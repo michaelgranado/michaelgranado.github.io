@@ -1,5 +1,6 @@
 body{
     margin: 0; /* Remove default margin */
+    background: lightyellow;
 }   
 iframe{
     display: block;  /* iframes are inline by default */
