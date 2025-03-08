@@ -10,8 +10,8 @@ iframe{
     background: lightyellow; /* Just for styling */
 }
 .tag:before{
-    content: '<'
+    content: '&lt;'
 }
 .tag:after{
-    content: '>'
+    content: '&lt;'
 }
