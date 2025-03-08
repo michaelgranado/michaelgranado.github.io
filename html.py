@@ -7,11 +7,9 @@ HTML_HEADER = """<!DOCTYPE html>
     </head>
     <body>
         <pre>
-            <span class="tag">
 """
 
-HTML_FOOTER = """           </span>
-        </pre>
+HTML_FOOTER = """       </pre>
     </body>
 </html>
 """
@@ -36,7 +34,7 @@ try:
         
         # Read line by line
         for line in old_file:
-            new_file.write(f'\t\t\t\t{line}')
+            new_file.write(line)
 
         new_file.write(HTML_FOOTER)
 except FileNotFoundError:
