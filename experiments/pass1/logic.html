@@ -4,7 +4,7 @@
         <link rel="stylesheet" href="/styles.css">
     </head>
     <body>
-        <pre>
+    <div  markdown="1">
 This implementation still has issues. The performance is particularly poor on large circle counts. Let's try a different approach that addresses the specific problems with the large datasets:
 
 ```cuda
@@ -526,6 +526,6 @@ __global__ void kernelRenderCircles() {
 ```
 
 This final implementation should provide both correctness (by processing circles in order for each pixel) and better performance (through optimized shared memory usage, early rejection of non-contributing circles, and more efficient memory access patterns).
-       </pre>
+       </div>
     </body>
 </html>
