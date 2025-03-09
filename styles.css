@@ -24,16 +24,3 @@ div{
     background: lightyellow;
 }
 
-pre.ex1{
-    -moz-osx-font-smoothing: grayscale;
-    -webkit-font-smoothing: antialiased !important;
-    -moz-font-smoothing: antialiased !important;
-    text-rendering: optimizelegibility !important;
-    font-size: 16px;
-	font-family: "Roboto", Arial;
-	line-height: 1.25em;
-	text-align: justify;
-    white-space: pre-wrap;
-    word-break: keep-all;
-    padding-left: 50px;
-}

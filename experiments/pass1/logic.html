@@ -2,9 +2,24 @@
 <html>
     <head>
         <link rel="stylesheet" href="/styles.css">
+        <style>
+        pre {
+            -moz-osx-font-smoothing: grayscale;
+            -webkit-font-smoothing: antialiased !important;
+            -moz-font-smoothing: antialiased !important;
+            text-rendering: optimizelegibility !important;
+            font-size: 16px;
+            font-family: "Roboto", Arial;
+            line-height: 1.25em;
+            text-align: justify;
+            white-space: pre-wrap;
+            word-break: keep-all;
+            padding-left: 50px;
+        }
+        </style>
     </head>
     <div>
-        <pre class="pre.ex1">
+        <pre>
 Let's first understand the task at hand. I am given a CUDA renderer for colored circles that has two major issues:
 It does not ensure image update operations are atomic.
 It does not preserve the required order of image updates.
