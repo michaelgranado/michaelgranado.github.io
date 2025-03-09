@@ -2,7 +2,7 @@ body{
     margin: 0; /* Remove default margin */
     background: lightyellow;
     font-family: 'Roboto', sans-serif;
-    font-size: 22px;
+    font-size: 18px;
 }   
 iframe{
     display: block;  /* iframes are inline by default */
@@ -29,7 +29,7 @@ p{
     -webkit-font-smoothing: antialiased !important;
     -moz-font-smoothing: antialiased !important;
     text-rendering: optimizelegibility !important;
-    font-size: 22px;
+    font-size: 18px;
 	font-family: "Roboto", Arial;
 	line-height: 1.25em;
 	padding: 0 0 1em 0;
