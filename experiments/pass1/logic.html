@@ -48,7 +48,7 @@
 
 <p>Based on my strategy, here's the implementation of the improved CUDA renderer:</p>
 
-```cuda
+<pre>
 #include <string>
 #include <algorithm>
 #include <math.h>
@@ -711,5 +711,5 @@ CudaRenderer::render() {
     kernelRenderCirclesOptimized<<<gridDim, blockDim>>>();
     cudaCheckError(cudaDeviceSynchronize());
 }
-```
+</pre>
 </div>
