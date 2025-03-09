@@ -1,8 +1,7 @@
 body{
-    margin: 0; /* Remove default margin */
+    margin: 2px; /* Remove default margin */
     background: lightyellow;
     font-family: 'Roboto', sans-serif;
-    font-size: 16px;
 }   
 iframe{
     display: block;  /* iframes are inline by default */
