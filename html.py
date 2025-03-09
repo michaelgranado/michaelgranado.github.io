@@ -27,15 +27,32 @@ if len(split_filename) == 1:
     print("Error: No File Extension Provided")
     exit(1)
 
-new_filename = split_filename[0] + '.html'
+file_type = split_filename[0]
+
+new_filename = file_type + '.html'
 try:
     with open(args.filename, 'r') as old_file, open(new_filename, 'w') as new_file:
-        new_file.write(HTML_HEADER) 
+        if file_type == "logic":
+            new_file.write('<body style="background: lightyellow;">\n')
+        else:
+            new_file.write(HTML_HEADER) 
         
+        marker = False
         # Read line by line
         for line in old_file:
-            new_file.write(line)
+            if file_type == "logic" and '```' in line:
+                if marker == False:
+                    line = "<pre>\n"
+                    marker = True
+                else:
+                    line = "</pre>\n"
+                    marker = False
 
-        new_file.write(HTML_FOOTER)
+            new_file.write(line)
+        
+        if file_type == "logic":
+            new_file.write('</body>\n')
+        else:
+            new_file.write(HTML_FOOTER)
 except FileNotFoundError:
     print("Error: File not found.")
