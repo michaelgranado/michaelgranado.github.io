@@ -18,7 +18,7 @@ iframe{
 }
 
 div{
-    width: 100vw;
+    width: 90vw;
     word-wrap: break-word;
     white-space: pre-wrap;
     background: lightyellow;
@@ -33,5 +33,5 @@ p{
 	font-family: "Roboto", Arial;
 	line-height: 1.25em;
 	text-align: justify;
-    padding-left: 20px;
+    padding-left: 50px;
 }
