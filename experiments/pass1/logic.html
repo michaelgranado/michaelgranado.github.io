@@ -4,8 +4,7 @@
         <link rel="stylesheet" href="/styles.css">
     </head>
     <div>
-        <p>
-        <pre style="white-space: pre-wrap; word-break: keep-all; padding-left: 50px;">
+        <pre class="pre.ex1">
 Let's first understand the task at hand. I am given a CUDA renderer for colored circles that has two major issues:
 It does not ensure image update operations are atomic.
 It does not preserve the required order of image updates.
@@ -542,6 +541,5 @@ I thought about using a two-pass approach: first identify all pixel-circle pairs
 I considered dividing the image into bins and processing each bin in parallel, but this would still require handling overlapping circles correctly.
 The pixel-centric approach is the most straightforward solution that guarantees both atomicity and order requirements.
        </pre>
-        </p>
     </div>
 </html>
