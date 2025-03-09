@@ -15,3 +15,10 @@ iframe{
 .tag:after{
     content: '&lt;'
 }
+
+p{
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-font-smoothing: antialiased !important;
+    -moz-font-smoothing: antialiased !important;
+    text-rendering: optimizelegibility !important;
+}
