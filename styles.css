@@ -17,6 +17,11 @@ iframe{
     content: '&lt;'
 }
 
+div{
+    width: 100vw;
+    word-wrap: break-word;
+}
+
 p{
     -moz-osx-font-smoothing: grayscale;
     -webkit-font-smoothing: antialiased !important;
