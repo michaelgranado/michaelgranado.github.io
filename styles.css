@@ -20,6 +20,7 @@ iframe{
 div{
     width: 100vw;
     word-wrap: break-word;
+    white-space: pre-wrap;
 }
 
 p{
