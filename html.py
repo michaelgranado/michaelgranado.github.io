@@ -18,7 +18,8 @@ parser = argparse.ArgumentParser(
                     prog='HTMLFormatter',
                     description='Formats Files into HTML to Display on WebPage',
                     epilog='Takes a commandline arg for the file to convert')
-parser.add_argument('filename') 
+parser.add_argument('filename')
+parser.add_argument('out_name')
 args = parser.parse_args()
 
 split_filename = args.filename.split(".")
@@ -29,9 +30,8 @@ if len(split_filename) == 1:
 
 file_type = split_filename[0]
 
-new_filename = file_type + '.html'
 try:
-    with open(args.filename, 'r') as old_file, open(new_filename, 'w') as new_file:
+    with open(args.filename, 'r') as old_file, open(args.out_name, 'w') as new_file:
         if file_type == "logic":
             new_file.write('<body style="background: lightyellow;">\n')
         else:
