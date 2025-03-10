@@ -49,7 +49,9 @@ try:
                     marker = False
             if (file_type != "logic" or (file_type == "logic" and marker and "<pre>\n" not in line)) and ("<" in line or ">" in line):
                 line = line.replace("<", "&lt;").replace(">", "&gt;")
-
+            
+            if "&params" in line:
+                line = line.replace("&", "&amp;")
             new_file.write(line)
         
         if file_type == "logic":
