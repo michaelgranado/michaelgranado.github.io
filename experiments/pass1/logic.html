@@ -80,6 +80,7 @@
 <h2>Implementation</h2>
 
 <pre>
+<code>
 #include <string>
 #include <algorithm>
 #include <math.h>
@@ -843,6 +844,7 @@ CudaRenderer::render() {
     kernelRenderTiles<<<gridDim2, blockDim2>>>();
     cudaDeviceSynchronize();
 }
+</code>
 </pre>
 
 <h2>Design Decisions and Implementation Details</h2>
