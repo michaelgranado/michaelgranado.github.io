@@ -48,8 +48,7 @@ try:
                     line = "</pre>\n"
                     marker = False
             if (file_type != "logic" or (file_type == "logic" and marker)) and ("<" in line or ">" in line):
-                line.replace("<", "&lt;")
-                line.replace(">", "&gt;")
+                line = line.replace("<", "&lt;").replace(">", "&gt;")
 
             new_file.write(line)
         
