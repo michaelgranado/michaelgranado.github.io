@@ -1,3 +1,13 @@
+<head>
+<style>
+.tag:before{
+content: '<'
+}
+.tag:after{
+content: '>'
+}
+</style>
+</head>
 <body style="background: lightyellow;">
 <html>
 <body>
@@ -80,7 +90,7 @@
 <h2>Implementation</h2>
 
 <pre>
-<code>
+<span class="tag">
 #include <string>
 #include <algorithm>
 #include <math.h>
@@ -844,7 +854,7 @@ CudaRenderer::render() {
     kernelRenderTiles<<<gridDim2, blockDim2>>>();
     cudaDeviceSynchronize();
 }
-</code>
+</span>
 </pre>
 
 <h2>Design Decisions and Implementation Details</h2>
