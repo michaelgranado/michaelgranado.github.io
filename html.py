@@ -35,7 +35,7 @@ try:
         if file_type == "logic":
             new_file.write('<body style="background: lightyellow;">\n')
         else:
-            new_file.write(HTML_HEADER) 
+            new_file.write(HTML_HEADER)
         
         marker = False
         # Read line by line
@@ -47,6 +47,9 @@ try:
                 else:
                     line = "</pre>\n"
                     marker = False
+            if (file_type != "logic" or (file_type == "logic" and marker)) and ("<" in line or ">" in line):
+                line.replace("<", "&lt;")
+                line.replace(">", "&gt;")
 
             new_file.write(line)
         
