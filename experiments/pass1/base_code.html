@@ -541,7 +541,7 @@ CudaRenderer::setup() {
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
 
-    cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants));
+    cudaMemcpyToSymbol(cuConstRendererParams, &amp;params, sizeof(GlobalConstants));
 
     // also need to copy over the noise lookup tables, so we can
     // implement noise on the GPU
