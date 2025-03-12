@@ -1,57 +1,57 @@
 
 Running scene: rgb...
 [rgb] Correctness passed!
-[rgb] Student times:  [0.2615, 0.2656, 0.2615]
-[rgb] Reference times:  [0.2685, 0.2671, 0.2663]
+[rgb] Student times:  [0.1856, 0.1984, 0.1855]
+[rgb] Reference times:  [0.2632, 0.2641, 0.2658]
 
 Running scene: rand10k...
 [rand10k] Correctness passed!
-[rand10k] Student times:  [43.272, 43.0905, 43.1506]
-[rand10k] Reference times:  [2.7564, 2.7495, 2.7512]
+[rand10k] Student times:  [40.0763, 40.152, 39.9803]
+[rand10k] Reference times:  [2.743, 2.7377, 2.745]
 
 Running scene: rand100k...
 [rand100k] Correctness passed!
-[rand100k] Student times:  [515.9614, 517.5498, 518.7421]
-[rand100k] Reference times:  [26.4901, 26.3057, 26.4204]
+[rand100k] Student times:  [463.6218, 468.4477, 470.7605]
+[rand100k] Reference times:  [26.1163, 26.0474, 26.0839]
 
 Running scene: pattern...
 [pattern] Correctness passed!
-[pattern] Student times:  [4.7567, 4.767, 4.7678]
-[pattern] Reference times:  [0.3634, 0.3573, 0.3598]
+[pattern] Student times:  [4.4504, 4.4505, 4.4489]
+[pattern] Reference times:  [0.3587, 0.3573, 0.3582]
 
 Running scene: snowsingle...
 [snowsingle] Correctness passed!
-[snowsingle] Student times:  [495.6694, 497.3558, 499.6458]
-[snowsingle] Reference times:  [16.3389, 16.2614, 16.2363]
+[snowsingle] Student times:  [446.8197, 447.8509, 447.8418]
+[snowsingle] Reference times:  [16.1382, 16.1288, 16.1209]
 
 Running scene: biglittle...
 [biglittle] Correctness passed!
-[biglittle] Student times:  [51.3461, 51.6708, 51.5798]
-[biglittle] Reference times:  [15.1022, 15.115, 15.1149]
+[biglittle] Student times:  [60.4595, 60.6642, 60.4121]
+[biglittle] Reference times:  [15.0484, 15.0407, 15.0383]
 
 Running scene: rand1M...
 [rand1M] Correctness passed!
-[rand1M] Student times:  [5594.6308, 5755.2785, 5825.2681]
-[rand1M] Reference times:  [212.4042, 211.9053, 211.537]
+[rand1M] Student times:  [5026.6056, 5164.2934, 5266.9585]
+[rand1M] Reference times:  [204.2572, 203.0526, 203.5106]
 
 Running scene: micro2M...
 [micro2M] Correctness passed!
-[micro2M] Student times:  [11659.8853, 11563.2801, 11560.9716]
-[micro2M] Reference times:  [398.2443, 398.3244, 398.1799]
+[micro2M] Student times:  [10517.5842, 10480.6087, 10201.0811]
+[micro2M] Reference times:  [363.6919, 363.6216, 363.4666]
 ------------
 Score table:
 ------------
 --------------------------------------------------------------------------
 | Scene Name      | Ref Time (T_ref) | Your Time (T)   | Score           |
 --------------------------------------------------------------------------
-| rgb             | 0.2663           | 0.2615          | 9               |
-| rand10k         | 2.7495           | 43.0905         | 2               |
-| rand100k        | 26.3057          | 515.9614        | 2               |
-| pattern         | 0.3573           | 4.7567          | 2               |
-| snowsingle      | 16.2363          | 495.6694        | 2               |
-| biglittle       | 15.1022          | 51.3461         | 5               |
-| rand1M          | 211.537          | 5594.6308       | 2               |
-| micro2M         | 398.1799         | 11560.9716      | 2               |
+| rgb             | 0.2632           | 0.1855          | 9               |
+| rand10k         | 2.7377           | 39.9803         | 2               |
+| rand100k        | 26.0474          | 463.6218        | 2               |
+| pattern         | 0.3573           | 4.4489          | 2               |
+| snowsingle      | 16.1209          | 446.8197        | 2               |
+| biglittle       | 15.0383          | 60.4121         | 4               |
+| rand1M          | 203.0526         | 5026.6056       | 2               |
+| micro2M         | 363.4666         | 10201.0811      | 2               |
 --------------------------------------------------------------------------
-|                                    | Total score:    | 26/72           |
+|                                    | Total score:    | 25/72           |
 --------------------------------------------------------------------------
