@@ -42,7 +42,8 @@
 
 <p>Based on the strategy and reasoning above, here's my implementation:</p>
 
-<pre><code>#include &lt;string&gt;
+```
+#include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
 #include &lt;stdio.h&gt;
@@ -723,7 +724,7 @@ CudaRenderer::render() {
     kernelRenderCircles<<<gridDim, blockDim>>>();
     cudaCheckError(cudaDeviceSynchronize());
 }
-</code></pre>
+```
 
 <h2>Explanation of the Implementation</h2>
 
