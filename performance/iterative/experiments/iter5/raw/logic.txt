@@ -1,67 +1,59 @@
-<div style="font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px;">
-    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px;">CUDA Circle Renderer - Fixed Implementation</h2>
+<h1>CUDA Circle Renderer Solution</h1>
 
-    <div style="background-color: #f8f9fa; padding: 15px; border-left: 5px solid #3498db; margin-bottom: 20px;">
-        <h3 style="margin-top: 0; color: #2c3e50;">Strategy</h3>
-        <p>
-            I'll implement a tile-based approach for the CUDA circle renderer that correctly respects both the atomicity and ordering requirements. The key components of this strategy are:
-        </p>
-        <ol>
-            <li>Divide the screen into tiles to exploit spatial locality and reduce work</li>
-            <li>Use a two-phase approach:
-                <ul>
-                    <li>First phase: For each tile, identify which circles potentially overlap with it</li>
-                    <li>Second phase: For each tile, render all the overlapping circles in the correct order</li>
-                </ul>
-            </li>
-            <li>Sort circles by their indices within each tile to maintain proper rendering order</li>
-            <li>Use local color accumulation to avoid repeated global memory operations</li>
-            <li>Ensure thread-safe updates to the frame buffer</li>
-        </ol>
-    </div>
+<h2>Strategy</h2>
+<p>
+To solve the issues in the incorrect code, I'll implement a correct CUDA renderer that ensures both atomicity and proper ordering of circle rendering. The key approach will be:
+</p>
 
-    <div style="background-color: #f8f9fa; padding: 15px; border-left: 5px solid #27ae60; margin-bottom: 20px;">
-        <h3 style="margin-top: 0; color: #2c3e50;">Reasoning</h3>
-        <p>
-            The previous implementation had several issues that caused it to fail the correctness tests:
-        </p>
+<ol>
+  <li>Handle the order requirement by processing all circles in a specific pixel in their original order</li>
+  <li>Ensure atomicity by having each thread compute its final pixel color locally before writing to global memory</li>
+  <li>Use a per-pixel approach rather than a per-circle approach to avoid race conditions</li>
+  <li>Map threads to pixels in the image, where each thread is responsible for computing the color of one pixel</li>
+  <li>For each pixel, sequentially iterate through all circles in their original order and accumulate color contributions</li>
+</ol>
 
-        <ol>
-            <li><strong>Ordering Problem:</strong> The code didn't ensure that circles were processed in their input order for pixels where multiple circles overlap. This is critical for correct transparency blending.</li>
-            <li><strong>Atomicity Issue:</strong> There was no guarantee that reads and writes to the image buffer were atomic, which could lead to race conditions.</li>
-            <li><strong>Implementation Complexity:</strong> The approach stored all circle indices in a fixed-size shared memory array, which could potentially overflow and discard circles that should affect a tile.</li>
-        </ol>
+<h2>Reasoning</h2>
+<p>
+The current implementation fails because it doesn't satisfy two key requirements:
+</p>
 
-        <p>
-            The new implementation addresses these issues by:
-        </p>
+<ol>
+  <li><strong>Atomicity requirement:</strong> The current implementation assigns one circle to each CUDA thread. Multiple threads could try to update the same pixel simultaneously, causing race conditions.</li>
+  <li><strong>Order requirement:</strong> The implementation doesn't guarantee that circles are processed in their input order when they overlap the same pixel.</li>
+</ol>
 
-        <ol>
-            <li><strong>Using a Two-Pass Approach:</strong> First, we identify which circles affect each tile, then process them in sorted order.</li>
-            <li><strong>Sorting Circles per Tile:</strong> For each tile, we explicitly sort the circles by their index to ensure proper order.</li>
-            <li><strong>Local Accumulation:</strong> Each thread accumulates color in local variables before writing to global memory once, reducing memory traffic.</li>
-            <li><strong>Proper Synchronization:</strong> We ensure thread synchronization to maintain correctness.</li>
-            <li><strong>Avoiding Shared Memory Limitations:</strong> Rather than having a fixed-size array for all circles, we process circles in batches to handle any number of overlapping circles per tile.</li>
-        </ol>
+<p>
+The tile-based binning approach in the incorrect code was on the right track, but it had issues with ensuring proper order within tiles. Also, it relied on shared memory for sorting, which could be problematic for handling large numbers of circles per tile.
+</p>
 
-        <p>
-            This approach ensures both correctness and performance by respecting the rendering order requirements while still exploiting the spatial locality of circles. By processing circles in batches per tile, we can handle any number of overlapping circles without running into memory limitations.
-        </p>
-    </div>
+<p>
+My approach solves these issues by:
+</p>
 
-    <div style="background-color: #f8f9fa; padding: 15px; border-left: 5px solid #e74c3c; margin-bottom: 20px;">
-        <h3 style="margin-top: 0; color: #2c3e50;">Code</h3>
-        <pre style="overflow-x: auto; background-color: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 5px;">
-```c++
+<ol>
+  <li><strong>Per-pixel parallelism:</strong> Each thread processes a unique pixel, eliminating race conditions between threads.</li>
+  <li><strong>Sequential circle processing:</strong> Each thread processes all circles in their original order, ensuring correct transparency blending.</li>
+  <li><strong>Local color accumulation:</strong> Each thread accumulates color in local registers before writing once to global memory, ensuring atomicity.</li>
+  <li><strong>Early circle rejection:</strong> Use the provided circle-box test to quickly reject circles that don't contribute to a pixel.</li>
+</ol>
+
+<p>
+This approach sacrifices some parallelism compared to approaches that would process circles in parallel, but it guarantees correctness while still leveraging GPU parallelism across pixels. For scenes with many circles, the work per pixel dominates, making this a reasonable tradeoff.
+</p>
+
+<h2>Code</h2>
+
+```cpp
 #include <string>
 #include <algorithm>
 #include <math.h>
 #include <stdio.h>
 #include <vector>
 
-#include &lt;cuda.h&gt;
-#include &lt;cuda_runtime.h&gt;
-#include &lt;driver_functions.h&gt;
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <driver_functions.h>
 
 #include "cudaRenderer.h"
 #include "image.h"
@@ -73,9 +65,7 @@
 // Putting all the cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
 
-#define TILE_SIZE 16
-#define SCAN_BLOCK_DIM TILE_SIZE * TILE_SIZE 
-#include "exclusiveScan.cu_inl"
+#define BLOCK_DIM 16
 
 // For error checking
 #define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
@@ -143,7 +133,7 @@ __global__ void kernelClearImageSnowflake() {
         return;
 
     int offset = 4 * (imageY * width + imageX);
-    float shade = .4f + .45f * static_cast&lt;float&gt;(height-imageY) / height;
+    float shade = .4f + .45f * static_cast<float>(height-imageY) / height;
     float4 value = make_float4(shade, shade, shade, 1.f);
 
     // write to global memory: As an optimization, I use a float4
@@ -437,182 +427,54 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* accumColor) {
     accumColor->w = alpha + oneMinusAlpha * accumColor->w;
 }
 
-// This kernel determines which circles might contribute to each tile
-__global__ void kernelCircleBinning(
-    int* circleCountPerTile,
-    int* circleBins,
-    int numTilesX,
-    int numTilesY,
-    int maxCirclesPerBin
-) {
-    int circleIndex = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (circleIndex >= cuConstRendererParams.numCircles)
-        return;
-    
-    int index3 = 3 * circleIndex;
-    float3 position = *(float3*)(&cuConstRendererParams.position[index3]);
-    float radius = cuConstRendererParams.radius[circleIndex];
-    
-    // Convert circle bounds to tile coordinates
-    int imageWidth = cuConstRendererParams.imageWidth;
-    int imageHeight = cuConstRendererParams.imageHeight;
-    
-    float invWidth = 1.0f / imageWidth;
-    float invHeight = 1.0f / imageHeight;
-    
-    // Compute circle bounds in normalized coordinates
-    float minX = position.x - radius;
-    float maxX = position.x + radius;
-    float minY = position.y - radius;
-    float maxY = position.y + radius;
-    
-    // Compute tile coordinates that the circle overlaps
-    int minTileX = max(0, (int)(minX * numTilesX));
-    int maxTileX = min(numTilesX - 1, (int)(maxX * numTilesX) + 1);
-    int minTileY = max(0, (int)(minY * numTilesY));
-    int maxTileY = min(numTilesY - 1, (int)(maxY * numTilesY) + 1);
-    
-    // Add circle to all overlapping tiles
-    for (int tileY = minTileY; tileY <= maxTileY; tileY++) {
-        for (int tileX = minTileX; tileX <= maxTileX; tileX++) {
-            int tileIndex = tileY * numTilesX + tileX;
-            
-            // Get current count of circles for this tile
-            int circleCount = atomicAdd(&circleCountPerTile[tileIndex], 1);
-            
-            // Add circle to bin if there's space
-            if (circleCount < maxCirclesPerBin) {
-                circleBins[tileIndex * maxCirclesPerBin + circleCount] = circleIndex;
-            }
-        }
-    }
-}
+// kernelRenderCircles -- (CUDA device code)
+//
+// Each thread renders a single pixel in the output image.
+// For each pixel, it checks against all circles in the input
+// and blends their color contributions in the specified order.
+__global__ void kernelRenderCircles() {
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
 
-// Process a batch of circles, rendering their contributions to the pixels in this tile
-__device__ void processCircleBatch(
-    int* circleIndices,
-    int numCircles,
-    int tileStartX,
-    int tileStartY,
-    int localX,
-    int localY,
-    int imageWidth,
-    int imageHeight,
-    float4* accumColor
-) {
-    int imageX = tileStartX + localX;
-    int imageY = tileStartY + localY;
-    
-    if (imageX >= imageWidth || imageY >= imageHeight)
-        return;
-    
-    float invWidth = 1.0f / imageWidth;
-    float invHeight = 1.0f / imageHeight;
-    
-    // Compute the pixel center in normalized coordinates
-    float2 pixelCenter = make_float2(
-        invWidth * (static_cast<float>(imageX) + 0.5f),
-        invHeight * (static_cast<float>(imageY) + 0.5f)
-    );
-    
-    // Process each circle in correct order
-    for (int i = 0; i < numCircles; i++) {
-        int circleIndex = circleIndices[i];
-        
-        // Get circle properties
-        int index3 = 3 * circleIndex;
-        float3 position = *(float3*)(&cuConstRendererParams.position[index3]);
-        
-        // Quick check if circle could contribute to this pixel
-        if (circleInBoxConservative(
-                position.x, position.y, cuConstRendererParams.radius[circleIndex],
-                pixelCenter.x - invWidth * 0.5f, pixelCenter.x + invWidth * 0.5f,
-                pixelCenter.y + invHeight * 0.5f, pixelCenter.y - invHeight * 0.5f)) {
-            
-            // Calculate circle's contribution to this pixel
-            shadePixel(circleIndex, pixelCenter, position, accumColor);
-        }
-    }
-}
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
 
-// Main rendering kernel
-__global__ void kernelRenderCircles(
-    int* circleCountPerTile,
-    int* circleBins,
-    int numTilesX,
-    int numTilesY,
-    int maxCirclesPerBin
-) {
-    // Calculate the tile index
-    int tileX = blockIdx.x;
-    int tileY = blockIdx.y;
-    int tileIndex = tileY * numTilesX + tileX;
-    
-    // Calculate thread position within tile
-    int localX = threadIdx.x;
-    int localY = threadIdx.y;
-    
-    // Calculate global image coordinates
-    int tileStartX = tileX * TILE_SIZE;
-    int tileStartY = tileY * TILE_SIZE;
-    int imageX = tileStartX + localX;
-    int imageY = tileStartY + localY;
-    
-    int imageWidth = cuConstRendererParams.imageWidth;
-    int imageHeight = cuConstRendererParams.imageHeight;
-    
-    // Skip if outside image bounds
-    if (imageX >= imageWidth || imageY >= imageHeight)
+    if (imageX >= width || imageY >= height)
         return;
-    
-    // Get the number of circles affecting this tile
-    int numCircles = min(circleCountPerTile[tileIndex], maxCirclesPerBin);
-    
-    // Shared memory to store sorted circle indices
-    __shared__ int sharedCircleIndices[TILE_SIZE * TILE_SIZE];
-    
-    // Load all circle indices into shared memory and sort them
-    if (localX == 0 && localY == 0) {
-        // Copy circle indices to shared memory
-        for (int i = 0; i < numCircles; i++) {
-            sharedCircleIndices[i] = circleBins[tileIndex * maxCirclesPerBin + i];
-        }
-        
-        // Simple insertion sort to ensure circles are processed in index order
-        for (int i = 1; i < numCircles; i++) {
-            int key = sharedCircleIndices[i];
-            int j = i - 1;
-            
-            while (j >= 0 && sharedCircleIndices[j] > key) {
-                sharedCircleIndices[j + 1] = sharedCircleIndices[j];
-                j--;
-            }
-            
-            sharedCircleIndices[j + 1] = key;
-        }
-    }
-    __syncthreads();
-    
-    // Initialize accumulated color for this pixel
+
+    float invWidth = 1.f / width;
+    float invHeight = 1.f / height;
+
     float4 accumColor = make_float4(0.f, 0.f, 0.f, 0.f);
-    
-    // Process circles in batches
-    processCircleBatch(
-        sharedCircleIndices,
-        numCircles,
-        tileStartX,
-        tileStartY,
-        localX,
-        localY,
-        imageWidth,
-        imageHeight,
-        &accumColor
-    );
-    
-    // Write final accumulated color to global memory
-    int offset = 4 * (imageY * imageWidth + imageX);
-    *(float4*)(&cuConstRendererParams.imageData[offset]) = accumColor;
+
+    // Compute pixel center
+    float2 pixelCenter;
+    pixelCenter.x = invWidth * (static_cast<float>(imageX) + 0.5f);
+    pixelCenter.y = invHeight * (static_cast<float>(imageY) + 0.5f);
+
+    // Create bounding box for this pixel
+    float boxL = pixelCenter.x - 0.5f * invWidth;
+    float boxR = pixelCenter.x + 0.5f * invWidth;
+    float boxT = pixelCenter.y + 0.5f * invHeight;
+    float boxB = pixelCenter.y - 0.5f * invHeight;
+
+    // Process all circles in sequential order to maintain proper transparency
+    for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
+        int index3 = 3 * circleIndex;
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIndex];
+
+        // Quick bounding box test to reject circles that don't overlap this pixel
+        if (circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+            // Check if the pixel center is within the circle
+            shadePixel(circleIndex, pixelCenter, p, &accumColor);
+        }
+    }
+
+    // Write final pixel color to output buffer
+    int offset = 4 * (imageY * width + imageX);
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[offset]);
+    *imgPtr = accumColor;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -821,55 +683,40 @@ CudaRenderer::advanceAnimation() {
 
 void
 CudaRenderer::render() {
-    // Calculate tile grid dimensions
-    int numTilesX = (image->width + TILE_SIZE - 1) / TILE_SIZE;
-    int numTilesY = (image->height + TILE_SIZE - 1) / TILE_SIZE;
-    int totalTiles = numTilesX * numTilesY;
-    
-    // Choose max circles per bin based on available shared memory
-    int maxCirclesPerBin = TILE_SIZE * TILE_SIZE;
-    
-    // Allocate memory for circle binning
-    int* circleCountPerTile;
-    int* circleBins;
-    
-    cudaCheckError(cudaMalloc(&circleCountPerTile, totalTiles * sizeof(int)));
-    cudaCheckError(cudaMalloc(&circleBins, totalTiles * maxCirclesPerBin * sizeof(int)));
-    
-    // Initialize counts to zero
-    cudaCheckError(cudaMemset(circleCountPerTile, 0, totalTiles * sizeof(int)));
-    
-    // Step 1: Bin the circles to tiles
-    dim3 blockDim1D(256);
-    dim3 gridDim1D((numCircles + blockDim1D.x - 1) / blockDim1D.x);
-    
-    kernelCircleBinning<<<gridDim1D, blockDim1D>>>(
-        circleCountPerTile,
-        circleBins,
-        numTilesX,
-        numTilesY,
-        maxCirclesPerBin
-    );
+    // Launch rendering kernel
+    dim3 blockDim(BLOCK_DIM, BLOCK_DIM);
+    dim3 gridDim(
+        (image->width + blockDim.x - 1) / blockDim.x,
+        (image->height + blockDim.y - 1) / blockDim.y);
+
+    kernelRenderCircles<<<gridDim, blockDim>>>();
     cudaCheckError(cudaDeviceSynchronize());
-    
-    // Step 2: Render each tile
-    dim3 blockDimTile(TILE_SIZE, TILE_SIZE);
-    dim3 gridDimTile(numTilesX, numTilesY);
-    
-    kernelRenderCircles<<<gridDimTile, blockDimTile>>>(
-        circleCountPerTile,
-        circleBins,
-        numTilesX,
-        numTilesY,
-        maxCirclesPerBin
-    );
-    cudaCheckError(cudaDeviceSynchronize());
-    
-    // Free temporary memory
-    cudaCheckError(cudaFree(circleCountPerTile));
-    cudaCheckError(cudaFree(circleBins));
 }
 ```
-        </pre>
-    </div>
-</div>
+
+<h2>Key Differences from the Incorrect Implementation</h2>
+
+<ol>
+  <li><strong>Simplified Architecture:</strong> The new implementation uses a much simpler per-pixel approach instead of the complex binning and sorting in the incorrect implementation.</li>
+  <li><strong>Order Preservation:</strong> By iterating through circles in their original order for each pixel, the correct rendering order is maintained.</li>
+  <li><strong>Atomicity Guarantee:</strong> Each thread computes the final color for exactly one pixel and writes it once to global memory, eliminating race conditions.</li>
+  <li><strong>No Shared Memory Sorting:</strong> Removed the complex shared memory management and sorting that could lead to bugs.</li>
+  <li><strong>Early Circle Rejection:</strong> Still uses the provided circle-box test to efficiently reject circles that don't overlap with the current pixel.</li>
+</ol>
+
+<h2>Performance Considerations</h2>
+
+<p>
+While this implementation prioritizes correctness over maximum performance, it should still perform reasonably well for several reasons:
+</p>
+
+<ol>
+  <li>It exploits pixel-level parallelism, which is substantial for typical output images (1024x1024 = over 1 million pixels)</li>
+  <li>It uses the provided circle-box test to quickly reject circles that don't affect a given pixel</li>
+  <li>It minimizes global memory operations by accumulating colors locally before writing</li>
+  <li>For scenes with few overlapping circles, most pixels will only process a small number of circles</li>
+</ol>
+
+<p>
+For very large numbers of circles, performance could be further improved with more sophisticated spatial data structures, but this implementation strikes a good balance between correctness, simplicity, and performance.
+</p>
