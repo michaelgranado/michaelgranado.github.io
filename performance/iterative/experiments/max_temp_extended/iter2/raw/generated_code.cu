@@ -634,4 +634,3 @@ CudaRenderer::render() {
     kernelRenderCircles<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }
-
