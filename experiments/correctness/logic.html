@@ -1,51 +1,45 @@
-<!DOCTYPE html>
-<html>
-    <head>
-        <link rel="stylesheet" href="/styles.css">
-    </head>
-    <body>
-        <pre>
-&lt;h1&gt;Strategy, Reasoning, and Implementation of a Correct CUDA Circle Renderer&lt;/h1&gt;
+<body style="background: lightyellow;">
+<h1>Strategy, Reasoning, and Implementation of a Correct CUDA Circle Renderer</h1>
 
-&lt;h2&gt;Strategy&lt;/h2&gt;
-&lt;p&gt;To correct the CUDA renderer implementation, I need to address two key requirements that the current implementation fails to meet:&lt;/p&gt;
-&lt;ol&gt;
-    &lt;li&gt;&lt;strong&gt;Atomicity&lt;/strong&gt;: All image update operations must be atomic. This includes reading the pixel's RGBA values, blending the circle's contribution, and writing back to memory.&lt;/li&gt;
-    &lt;li&gt;&lt;strong&gt;Order&lt;/strong&gt;: Updates to a pixel must be performed in circle input order. If multiple circles contribute to the same pixel, their contributions must be applied in the order they were provided.&lt;/li&gt;
-&lt;/ol&gt;
+<h2>Strategy</h2>
+<p>To correct the CUDA renderer implementation, I need to address two key requirements that the current implementation fails to meet:</p>
+<ol>
+    <li><strong>Atomicity</strong>: All image update operations must be atomic. This includes reading the pixel's RGBA values, blending the circle's contribution, and writing back to memory.</li>
+    <li><strong>Order</strong>: Updates to a pixel must be performed in circle input order. If multiple circles contribute to the same pixel, their contributions must be applied in the order they were provided.</li>
+</ol>
 
-&lt;p&gt;My strategy will involve:&lt;/p&gt;
-&lt;ol&gt;
-    &lt;li&gt;Creating a new rendering approach that processes pixels instead of circles to ensure correct ordering&lt;/li&gt;
-    &lt;li&gt;Implementing a two-phase algorithm:
-        &lt;ul&gt;
-            &lt;li&gt;&lt;strong&gt;Phase 1&lt;/strong&gt;: Determine which circles affect each pixel&lt;/li&gt;
-            &lt;li&gt;&lt;strong&gt;Phase 2&lt;/strong&gt;: Process each pixel, applying circle contributions in the correct order&lt;/li&gt;
-        &lt;/ul&gt;
-    &lt;/li&gt;
-    &lt;li&gt;Using atomic operations for image updates where needed&lt;/li&gt;
-&lt;/ol&gt;
+<p>My strategy will involve:</p>
+<ol>
+    <li>Creating a new rendering approach that processes pixels instead of circles to ensure correct ordering</li>
+    <li>Implementing a two-phase algorithm:
+        <ul>
+            <li><strong>Phase 1</strong>: Determine which circles affect each pixel</li>
+            <li><strong>Phase 2</strong>: Process each pixel, applying circle contributions in the correct order</li>
+        </ul>
+    </li>
+    <li>Using atomic operations for image updates where needed</li>
+</ol>
 
-&lt;h2&gt;Reasoning&lt;/h2&gt;
-&lt;p&gt;The current implementation assigns one thread per circle and has that thread update all pixels the circle overlaps with. This approach has two problems:&lt;/p&gt;
+<h2>Reasoning</h2>
+<p>The current implementation assigns one thread per circle and has that thread update all pixels the circle overlaps with. This approach has two problems:</p>
 
-&lt;ol&gt;
-    &lt;li&gt;Multiple threads might try to update the same pixel simultaneously (violating atomicity)&lt;/li&gt;
-    &lt;li&gt;The updates might not occur in the correct order (violating the ordering requirement)&lt;/li&gt;
-&lt;/ol&gt;
+<ol>
+    <li>Multiple threads might try to update the same pixel simultaneously (violating atomicity)</li>
+    <li>The updates might not occur in the correct order (violating the ordering requirement)</li>
+</ol>
 
-&lt;p&gt;I've decided to rethink the approach completely by switching to a pixel-centric method:&lt;/p&gt;
+<p>I've decided to rethink the approach completely by switching to a pixel-centric method:</p>
 
-&lt;ol&gt;
-    &lt;li&gt;&lt;strong&gt;Each pixel will be processed by a thread&lt;/strong&gt;: This naturally ensures atomicity as each thread is responsible for a single pixel&lt;/li&gt;
-    &lt;li&gt;&lt;strong&gt;Each thread will check all circles&lt;/strong&gt;: For each pixel, we'll check which circles contribute to it, collect those contributions, and apply them in order&lt;/li&gt;
-&lt;/ol&gt;
+<ol>
+    <li><strong>Each pixel will be processed by a thread</strong>: This naturally ensures atomicity as each thread is responsible for a single pixel</li>
+    <li><strong>Each thread will check all circles</strong>: For each pixel, we'll check which circles contribute to it, collect those contributions, and apply them in order</li>
+</ol>
 
-&lt;p&gt;This approach ensures correctness but might not be the most efficient. However, as per the instructions, we're focusing only on correctness, not performance.&lt;/p&gt;
+<p>This approach ensures correctness but might not be the most efficient. However, as per the instructions, we're focusing only on correctness, not performance.</p>
 
-&lt;h2&gt;Code&lt;/h2&gt;
+<h2>Code</h2>
 
-```cpp
+<pre>
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -709,56 +703,54 @@ CudaRenderer::render() {
     
     cudaDeviceSynchronize();
 }
-```
+</pre>
 
-&lt;h2&gt;Explanation of the Solution&lt;/h2&gt;
+<h2>Explanation of the Solution</h2>
 
-&lt;p&gt;My solution focuses on ensuring both atomicity and correct ordering of circle contributions to pixels. Here's how I approached it:&lt;/p&gt;
+<p>My solution focuses on ensuring both atomicity and correct ordering of circle contributions to pixels. Here's how I approached it:</p>
 
-&lt;h3&gt;Key Changes&lt;/h3&gt;
+<h3>Key Changes</h3>
 
-&lt;ol&gt;
-    &lt;li&gt;&lt;strong&gt;Pixel-based Processing&lt;/strong&gt;: Instead of processing one circle per thread, I've inverted the approach to process one pixel per thread. This ensures no competition between threads for the same pixel.&lt;/li&gt;
+<ol>
+    <li><strong>Pixel-based Processing</strong>: Instead of processing one circle per thread, I've inverted the approach to process one pixel per thread. This ensures no competition between threads for the same pixel.</li>
     
-    &lt;li&gt;&lt;strong&gt;Modified shadePixel Function&lt;/strong&gt;: I modified the shading function to return a color value instead of directly writing to the output image. This allows us to collect contributions from all circles before finalizing the pixel color.&lt;/li&gt;
+    <li><strong>Modified shadePixel Function</strong>: I modified the shading function to return a color value instead of directly writing to the output image. This allows us to collect contributions from all circles before finalizing the pixel color.</li>
     
-    &lt;li&gt;&lt;strong&gt;In-order Processing&lt;/strong&gt;: Each pixel thread processes all circles in the exact order they were provided, ensuring that the ordering requirement is met.&lt;/li&gt;
+    <li><strong>In-order Processing</strong>: Each pixel thread processes all circles in the exact order they were provided, ensuring that the ordering requirement is met.</li>
     
-    &lt;li&gt;&lt;strong&gt;Efficient Circle Testing&lt;/strong&gt;: I use the circleInBoxConservative function to quickly determine if a circle might contribute to a pixel, avoiding unnecessary calculations.&lt;/li&gt;
-&lt;/ol&gt;
+    <li><strong>Efficient Circle Testing</strong>: I use the circleInBoxConservative function to quickly determine if a circle might contribute to a pixel, avoiding unnecessary calculations.</li>
+</ol>
 
-&lt;h3&gt;Implementation Details&lt;/h3&gt;
+<h3>Implementation Details</h3>
 
-&lt;ol&gt;
-    &lt;li&gt;&lt;strong&gt;New Kernel - kernelRenderPixels&lt;/strong&gt;: This kernel is launched with a 2D grid that matches the image dimensions, with one thread per pixel.&lt;/li&gt;
+<ol>
+    <li><strong>New Kernel - kernelRenderPixels</strong>: This kernel is launched with a 2D grid that matches the image dimensions, with one thread per pixel.</li>
     
-    &lt;li&gt;&lt;strong&gt;Modified shadePixelRGBA&lt;/strong&gt;: This function now returns a float4 color+alpha value instead of directly updating the image.&lt;/li&gt;
+    <li><strong>Modified shadePixelRGBA</strong>: This function now returns a float4 color+alpha value instead of directly updating the image.</li>
     
-    &lt;li&gt;&lt;strong&gt;New blendPixel Function&lt;/strong&gt;: This helper function blends a new color contribution with the current pixel color, following the same blending math as in the original code.&lt;/li&gt;
+    <li><strong>New blendPixel Function</strong>: This helper function blends a new color contribution with the current pixel color, following the same blending math as in the original code.</li>
     
-    &lt;li&gt;&lt;strong&gt;Render Method Update&lt;/strong&gt;: The render method now launches a 2D grid for pixel-based processing instead of a 1D grid for circle-based processing.&lt;/li&gt;
-&lt;/ol&gt;
+    <li><strong>Render Method Update</strong>: The render method now launches a 2D grid for pixel-based processing instead of a 1D grid for circle-based processing.</li>
+</ol>
 
-&lt;h3&gt;Advantages of This Approach&lt;/h3&gt;
+<h3>Advantages of This Approach</h3>
 
-&lt;ol&gt;
-    &lt;li&gt;&lt;strong&gt;Guaranteed Correctness&lt;/strong&gt;: By processing one pixel per thread and examining circles in order, both atomicity and ordering requirements are met.&lt;/li&gt;
+<ol>
+    <li><strong>Guaranteed Correctness</strong>: By processing one pixel per thread and examining circles in order, both atomicity and ordering requirements are met.</li>
     
-    &lt;li&gt;&lt;strong&gt;Simple Implementation&lt;/strong&gt;: The solution is straightforward and doesn't require complex data structures or synchronization mechanisms.&lt;/li&gt;
+    <li><strong>Simple Implementation</strong>: The solution is straightforward and doesn't require complex data structures or synchronization mechanisms.</li>
     
-    &lt;li&gt;&lt;strong&gt;No Need for Atomic Operations&lt;/strong&gt;: Since each thread only updates one pixel, there's no need for explicit atomic operations.&lt;/li&gt;
-&lt;/ol&gt;
+    <li><strong>No Need for Atomic Operations</strong>: Since each thread only updates one pixel, there's no need for explicit atomic operations.</li>
+</ol>
 
-&lt;h3&gt;Performance Considerations (Though Not Required)&lt;/h3&gt;
+<h3>Performance Considerations (Though Not Required)</h3>
 
-&lt;p&gt;While focusing only on correctness as instructed, I note that this solution might not be the most performant due to:&lt;/p&gt;
+<p>While focusing only on correctness as instructed, I note that this solution might not be the most performant due to:</p>
 
-&lt;ol&gt;
-    &lt;li&gt;Each thread potentially checks all circles, which could be inefficient for scenes with many circles.&lt;/li&gt;
-    &lt;li&gt;There's no exploitation of spatial coherence or other optimizations that could reduce the workload.&lt;/li&gt;
-    &lt;li&gt;Memory access patterns may not be optimal for coalescing.&lt;/li&gt;
-&lt;/ol&gt;
+<ol>
+    <li>Each thread potentially checks all circles, which could be inefficient for scenes with many circles.</li>
+    <li>There's no exploitation of spatial coherence or other optimizations that could reduce the workload.</li>
+    <li>Memory access patterns may not be optimal for coalescing.</li>
+</ol>
 
-&lt;p&gt;However, for the purpose of this assignment where correctness is the priority, this solution ensures that both the atomicity and ordering requirements are fully satisfied.&lt;/p&gt;       </pre>
-    </body>
-</html>
+<p>However, for the purpose of this assignment where correctness is the priority, this solution ensures that both the atomicity and ordering requirements are fully satisfied.</p></body>
