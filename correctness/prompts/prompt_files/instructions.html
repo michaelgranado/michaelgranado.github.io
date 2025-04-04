@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+    <body style="background: lightyellow;">
+<h1 id="assignment-3-a-simple-cuda-renderer">Assignment 3: A Simple CUDA Renderer</h1>
+<h2 id="overview">Overview</h2>
+<p>In this assignment you will write a parallel renderer in CUDA that draws colored circles.
+While this renderer is very simple, parallelizing the renderer will require you to design and implement data structures
+that can be efficiently constructed and manipulated in parallel. This is a challenging
+assignment so you are advised to start early. <strong>Seriously, you are advised to start early.</strong> Good luck!</p>
+<h2 id="part-3-a-simple-circle-renderer-85-pts-">Part 3: A Simple Circle Renderer (85 pts)</h2>
+<p>Now for the real show!</p>
+<p>The directory <code>/render</code> of the assignment starter code contains an implementation of renderer that draws colored
+circles. Build the code, and run the render with the following command line: <code>./render -r cpuref rgb</code>. The program will output an image <code>output_0000.ppm</code> containing three circles. Now run the renderer with the command line <code>./render -r cpuref snow</code>. Now the output image will be falling snow. PPM images can be viewed directly on OSX via preview. For windows you might need to download a viewer.</p>
+<p>Note: you can also use the <code>-i</code> option to send renderer output to the display instead of a file. (In the case of snow, you&#39;ll see an animation of falling snow.) However, to use interactive mode you&#39;ll need to be able to setup X-windows forwarding to your local machine. (<a href="http://atechyblog.blogspot.com/2014/12/google-cloud-compute-x11-forwarding.html">This reference</a> or <a href="https://stackoverflow.com/questions/25521486/x11-forwarding-from-debian-on-google-compute-engine">this reference</a> may help.)</p>
+<p>The assignment starter code contains two versions of the renderer: a sequential, single-threaded C++
+reference implementation, implemented in <code>refRenderer.cpp</code>, and an <em>incorrect</em> parallel CUDA implementation in
+<code>cudaRenderer.cu</code>.</p>
+<h3 id="renderer-overview">Renderer Overview</h3>
+<p>We encourage you to familiarize yourself with the structure of the renderer codebase by inspecting the reference
+implementation in <code>refRenderer.cpp</code>. The method <code>setup</code> is called prior to rendering the first frame. In your CUDA-accelerated
+renderer, this method will likely contain all your renderer initialization code (allocating buffers, etc). <code>render</code>
+is called each frame and is responsible for drawing all circles into the output image. The other main function of
+the renderer, <code>advanceAnimation</code>, is also invoked once per frame. It updates circle positions and velocities.
+You will not need to modify <code>advanceAnimation</code> in this assignment.</p>
+<p>The renderer accepts an array of circles (3D position, velocity, radius, color) as input. The basic sequential
+algorithm for rendering each frame is:</p>
+<pre><code>Clear image
+for each circle
+    <span class="hljs-keyword">update</span> <span class="hljs-keyword">position</span> <span class="hljs-keyword">and</span> velocity
+<span class="hljs-keyword">for</span> <span class="hljs-keyword">each</span> circle
+    <span class="hljs-keyword">compute</span> screen bounding box
+    <span class="hljs-keyword">for</span> all pixels <span class="hljs-keyword">in</span> bounding box
+        <span class="hljs-keyword">compute</span> pixel center point
+        <span class="hljs-keyword">if</span> center point <span class="hljs-keyword">is</span> <span class="hljs-keyword">within</span> the circle
+            <span class="hljs-keyword">compute</span> color <span class="hljs-keyword">of</span> circle <span class="hljs-keyword">at</span> point
+            blend contribution <span class="hljs-keyword">of</span> circle <span class="hljs-keyword">into</span> image <span class="hljs-keyword">for</span> this pixel
+</code></pre><p>The figure below illustrates the basic algorithm for computing circle-pixel coverage using point-in-circle tests. Notice that a circle contributes color to an output pixel only if the pixel&#39;s center lies within the circle.</p>
+<p><img src="handout/point_in_circle.jpg?raw=true" alt="Point in circle test" title="A simple algorithm for computing the contribution of a circle to the output image: All pixels within the circle&#39;s bounding box are tested for coverage. For each pixel in the bounding box, the pixel is considered to be covered by the circle if its center point (black dots) is contained within the circle. Pixel centers that are inside the circle are colored red. The circle&#39;s contribution to the image will be computed only for covered pixels."></p>
+<p>An important detail of the renderer is that it renders <strong>semi-transparent</strong> circles. Therefore, the color of any one pixel is not the color of a single circle, but the result of blending the contributions of all the semi-transparent circles overlapping the pixel (note the &quot;blend contribution&quot; part of the pseudocode above). The renderer represents the color of a circle via a 4-tuple of red (R), green (G), blue (B), and opacity (alpha) values (RGBA). Alpha = 1 corresponds to a fully opaque circle. Alpha = 0 corresponds to a fully transparent circle. To draw a semi-transparent circle with color <code>(C_r, C_g, C_b, C_alpha)</code> on top of a pixel with color <code>(P_r, P_g, P_b)</code>, the renderer uses the following math:</p>
+<pre>
+   result_r = C_alpha * C_r + (1.0 - C_alpha) * P_r
+   result_g = C_alpha * C_g + (1.0 - C_alpha) * P_g
+   result_b = C_alpha * C_b + (1.0 - C_alpha) * P_b
+</pre>
+
+<p>Notice that composition is not commutative (object X over Y does not look the same as object Y over X), so it&#39;s important that the render draw circles in a manner that follows the order they are provided by the application. (You can assume the application provides the circles in depth order.) For example, consider the two images below where a blue circle is drawn OVER a green circle which is drawn OVER a red circle. In the image on the left, the circles are drawn into the output image in the correct order. In the image on the right, the circles are drawn in a different order, and the output image does not look correct.</p>
+<p><img src="handout/order.jpg?raw=true" alt="Ordering" title="The renderer must be careful to generate output that is the same as what is generated when sequentially drawing all circles in the order provided by the application."></p>
+<h3 id="cuda-renderer">CUDA Renderer</h3>
+<p>After familiarizing yourself with the circle rendering algorithm as implemented in the reference code, now
+study the CUDA implementation of the renderer provided in <code>cudaRenderer.cu</code>. You can run the CUDA
+implementation of the renderer using the <code>--renderer cuda (or -r cuda)</code> cuda program option.</p>
+<p>The provided CUDA implementation parallelizes computation across all input circles, assigning one circle to
+each CUDA thread. While this CUDA implementation is a complete implementation of the mathematics of
+a circle renderer, it contains several major errors that you will fix in this assignment. Specifically: the current
+implementation does not ensure image update is an atomic operation and it does not preserve the required
+order of image updates (the ordering requirement will be described below).</p>
+<h3 id="renderer-requirements">Renderer Requirements</h3>
+<p>Your parallel CUDA renderer implementation must maintain two invariants that are preserved trivially in
+the sequential implementation.</p>
+<ol>
+<li><strong>Atomicity:</strong> All image update operations must be atomic. The critical region includes reading the
+four 32-bit floating-point values (the pixel&#39;s rgba color), blending the contribution of the current circle with
+the current image value, and then writing the pixel&#39;s color back to memory.</li>
+<li><strong>Order:</strong> Your renderer must perform updates to an image pixel in <em>circle input order</em>. That is, if
+circle 1 and circle 2 both contribute to pixel P, any image updates to P due to circle 1 must be applied to the
+image before updates to P due to circle 2. As discussed above, preserving the ordering requirement
+allows for correct rendering of transparent circles. (It has a number of other benefits for graphics
+systems. If curious, talk to Kayvon.) <strong>A key observation is that the definition of order only specifies the order of updates to the same pixel.</strong> Thus, as shown below, there are no ordering requirements between circles that do not contribute to the same pixel. These circles can be processed independently.</li>
+</ol>
+<p><img src="handout/dependencies.jpg?raw=true" alt="Dependencies" title="The contributions of circles 1, 2, and 3 must be applied to overlapped pixels in the order the circles are provided to the renderer."></p>
+<p>Since the provided CUDA implementation does not satisfy either of these requirements, the result of not correctly
+respecting order or atomicity can be seen by running the CUDA renderer implementation on the rgb and circles scenes.
+You will see horizontal streaks through the resulting images, as shown below. These streaks will change with each frame.</p>
+<p><img src="handout/bug_example.jpg?raw=true" alt="Order_errors" title="Errors in the output due to lack of atomicity in frame-buffer update (notice streaks in bottom of image)."></p>
+<h3 id="what-you-need-to-do">What You Need To Do</h3>
+<p><strong>Your job is to write the fastest, correct CUDA renderer implementation you can</strong>. You may take any approach you
+see fit, but your renderer must adhere to the atomicity and order requirements specified above. A solution that does not meet both requirements will be given no more than 12 points on part 3 of the assignment. We have already given you such a solution!</p>
+<p>A good place to start would be to read through <code>cudaRenderer.cu</code> and convince yourself that it <em>does not</em> meet the correctness requirement. In particular, look at how <code>CudaRenderer:render</code> launches the CUDA kernel <code>kernelRenderCircles</code>. (<code>kernelRenderCircles</code> is where all the work happens.) To visually see the effect of violation of above two requirements, compile the program with <code>make</code>. Then run <code>./render -r cuda rand10k</code> which should display the image with 10K circles, shown in the bottom row of the image above. Compare this (incorrect) image with the image generated by sequential code by running <code>./render -r cpuref rand10k</code>.</p>
+<p>We recommend that you:</p>
+<ol>
+<li>First rewrite the CUDA starter code implementation so that it is logically correct when running in parallel (we recommend an approach that does not require locks or synchronization)</li>
+<li>Then determine what performance problem is with your solution.</li>
+<li>At this point the real thinking on the assignment begins... (Hint: the circle-intersects-box tests provided to you in <code>circleBoxTest.cu_inl</code> are your friend. You are encouraged to use these subroutines.)</li>
+</ol>
+<p>Following are commandline options to <code>./render</code>:</p>
+<pre><code>Usage: ./render [options] scenename
+Valid scenenames are: rgb, rgby, rand10k, rand100k, rand1M, biglittle, littlebig, pattern, micro2M,
+                      bouncingballs, fireworks, hypnosis, snow, snowsingle
+<span class="hljs-function"><span class="hljs-keyword">Program</span></span> Options:
+  -r  --renderer &lt;cpuref/cuda&gt;  <span class="hljs-keyword">Select</span> renderer: ref or cuda (<span class="hljs-keyword">default</span>=cuda)
+  -s  --<span class="hljs-built_in">size</span>  &lt;<span class="hljs-built_in">INT</span>&gt;             Rendered image <span class="hljs-built_in">size</span>: &lt;<span class="hljs-built_in">INT</span>&gt;x&lt;<span class="hljs-built_in">INT</span>&gt; pixels (<span class="hljs-keyword">default</span>=<span class="hljs-number">1024</span>)
+  -b  --bench &lt;START:<span class="hljs-keyword">END</span>&gt;       Run for frames [START,<span class="hljs-keyword">END</span>) (<span class="hljs-keyword">default</span>=[<span class="hljs-number">0</span>,<span class="hljs-number">1</span>))
+  -c  --check                   Check correctness of CUDA output against CPU reference
+  -i  --interactive             Render output to interactive display
+  -f  --<span class="hljs-keyword">file</span>  &lt;FILENAME&gt;        Output <span class="hljs-keyword">file</span> <span class="hljs-keyword">name</span> (FILENAME_xxxx.ppm) (<span class="hljs-keyword">default</span>=output)
+  -?  --help                    This message
+</code></pre><p><strong>Checker code:</strong> To detect correctness of the program, <code>render</code> has a convenient <code>--check</code> option. This option runs the sequential version of the reference CPU renderer along with your CUDA renderer and then compares the resulting images to ensure correctness. The time taken by your CUDA renderer implementation is also printed.</p>
+<p>We provide a total of eight circle datasets you will be graded on. However, in order to receive full credit, your code must pass all of our correctness-tests. To check the correctness and performance score of your code, run <strong><code>./checker.py</code></strong> (notice the .py extension) in the <code>/render</code> directory. If you run it on the starter code, the program will print a table like the following, along with the results of our entire test set:</p>
+<pre><code>Score table:
+------------
+--------------------------------------------------------------------------
+|<span class="hljs-string"> Scene Name      </span>|<span class="hljs-string"> Ref Time (T_ref) </span>|<span class="hljs-string"> Your Time (T)   </span>|<span class="hljs-string"> Score           </span>|
+--------------------------------------------------------------------------
+|<span class="hljs-string"> rgb             </span>|<span class="hljs-string"> 0.2698           </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> rand10k         </span>|<span class="hljs-string"> 2.7341           </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> rand100k        </span>|<span class="hljs-string"> 26.1481          </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> pattern         </span>|<span class="hljs-string"> 0.3591           </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> snowsingle      </span>|<span class="hljs-string"> 16.1636          </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> biglittle       </span>|<span class="hljs-string"> 14.9861          </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> rand1M          </span>|<span class="hljs-string"> 188.0086         </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+|<span class="hljs-string"> micro2M         </span>|<span class="hljs-string"> 355.9104         </span>|<span class="hljs-string"> (F)             </span>|<span class="hljs-string"> 0               </span>|
+--------------------------------------------------------------------------
+|<span class="hljs-string">                                    </span>|<span class="hljs-string"> Total score:    </span>|<span class="hljs-string"> 0/72            </span>|
+--------------------------------------------------------------------------
+</code></pre><p>Note: on some runs, you <em>may</em> receive credit for some of these scenes, since the provided renderer&#39;s runtime is non-deterministic sometimes it might be correct. This doesn&#39;t change the fact that the current CUDA renderer is in general incorrect.</p>
+<p>&quot;Ref time&quot; is the performance of our reference solution on your current machine (in the provided <code>render_ref</code> executable). &quot;Your time&quot; is the performance of your current CUDA renderer solution, where an <code>(F)</code> indicates an incorrect solution. Your grade will depend on the performance of your implementation compared to these reference implementations (see Grading Guidelines).</p>
+<p>Along with your code, we would like you to hand in a clear, high-level description of how your implementation works as well as a brief description of how you arrived at this solution. Specifically address approaches you tried along the way, and how you went about determining how to optimize your code (For example, what measurements did you perform to guide your optimization efforts?).</p>
+<p>Aspects of your work that you should mention in the write-up include:</p>
+<ol>
+<li>Include both partners names and SUNet id&#39;s at the top of your write-up.</li>
+<li>Replicate the score table generated for your solution and specify which machine you ran your code on.</li>
+<li>Describe how you decomposed the problem and how you assigned work to CUDA thread blocks and threads (and maybe even warps).</li>
+<li>Describe where synchronization occurs in your solution.</li>
+<li>What, if any, steps did you take to reduce communication requirements (e.g., synchronization or main memory bandwidth requirements)?</li>
+<li>Briefly describe how you arrived at your final solution. What other approaches did you try along the way. What was wrong with them?</li>
+</ol>
+<h3 id="grading-guidelines">Grading Guidelines</h3>
+<ul>
+<li>The write-up for the assignment is worth 7 points.</li>
+<li>Your implementation is worth 72 points. These are equally divided into 9 points per scene as follows:<ul>
+<li>2 correctness points per scene.</li>
+<li>7 performance points per scene (only obtainable if the solution is correct). Your performance will be graded with respect to the performance of a provided benchmark reference renderer, T<sub>ref</sub>:<ul>
+<li>No performance points will be given for solutions having time (T) 10 times the magnitude of T<sub>ref</sub>.</li>
+<li>Full performance points will be given for solutions within 20% of the optimized solution ( T &lt;= 1.20 * T<sub>ref</sub> )</li>
+<li>For other values of T (for 1.20 T<sub>ref</sub> &lt; T &lt; 10 <em> T<sub>ref</sub>), your performance score on a scale 1 to 7 will be calculated as: `7 </em> T_ref / T`.</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><p>Your implementation&#39;s performance on the class leaderboard is worth the final 6 points. Submission and grading details for the leaderboard will be detailed in a subsequent Ed post.</p>
+</li>
+<li><p>Up to five points extra credit (instructor discretion) for solutions that achieve significantly greater performance than required. Your write up must clearly explain your approach thoroughly.</p>
+</li>
+<li>Up to five points extra credit (instructor discretion) for a high-quality parallel CPU-only renderer implementation that achieves good utilization of all cores and SIMD vector units of the cores. Feel free to use any tools at your disposal (e.g., SIMD intrinsics, ISPC, pthreads). To receive credit you should analyze the performance of your GPU and CPU-based solutions and discuss the reasons for differences in implementation choices made.</li>
+</ul>
+<p>So the total points for this project is as follows:</p>
+<ul>
+<li>part 1 (5 points)</li>
+<li>part 2 (10 points)</li>
+<li>part 3 write up (7 points)</li>
+<li>part 3 implementation (72 points)</li>
+<li>part 3 leaderboard (6 points)</li>
+<li>potential <strong>extra</strong> credit (up to 10 points)</li>
+</ul>
+<h2 id="assignment-tips-and-hints">Assignment Tips and Hints</h2>
+<p>Below are a set of tips and hints compiled from previous years. Note that there are various ways to implement your renderer and not all hints may apply to your approach.</p>
+<ul>
+<li>There are two potential axes of parallelism in this assignment. One axis is <em>parallelism across pixels</em> another is <em>parallelism across circles</em> (provided the ordering requirement is respected for overlapping circles). Solutions will need to exploit both types of parallelism, potentially at different parts of the computation.</li>
+<li>The circle-intersects-box tests provided to you in <code>circleBoxTest.cu_inl</code> are your friend. You are encouraged to use these subroutines.</li>
+<li>The shared-memory prefix-sum operation provided in <code>exclusiveScan.cu_inl</code> may be valuable to you on this assignment (not all solutions may choose to use it). See the simple description of a prefix-sum <a href="https://nvidia.github.io/cccl/thrust/api/function_group__prefixsums_1ga333bd4f34742dcf68d3ac5a0933f67db.html">here</a>. We
+have provided an implementation of an exclusive prefix-sum on a <strong>power-of-two-sized</strong> arrays in shared memory. <strong>The provided code does not work on non-power-of-two inputs and IT ALSO REQUIRES THAT THE NUMBER OF THREADS IN THE THREAD BLOCK BE THE SIZE OF THE ARRAY. PLEASE READ THE COMMENTS IN THE CODE.</strong></li>
+<li>Take a look at the <code>shadePixel</code> method that is being called. Notice how it is doing many global memory operations to update the color of a pixel. It might be wise to instead use a local accumulator in your <code>kernelRenderCircles</code> method. You can then perform the accumulation of a pixel value in a register, and once the final pixel value is accumulated you can then just perform a single write to global memory.</li>
+<li>You are allowed to use the <a href="http://thrust.github.io/">Thrust library</a> in your implementation if you so choose. Thrust is not necessary to achieve the performance of the optimized CUDA reference implementations. There is one popular way of solving the problem that uses the shared memory prefix-sum implementation that we give you. There another popular way that uses the prefix-sum routines in the Thrust library. Both are valid solution strategies.</li>
+<li>Is there data reuse in the renderer? What can be done to exploit this reuse?</li>
+<li>How will you ensure atomicity of image update since there is no CUDA language primitive that performs the logic of the image update operation atomically? Constructing a lock out of global memory atomic operations is one solution, but keep in mind that even if your image update is atomic, the updates must be performed in the required order. <strong>We suggest that you think about ensuring order in your parallel solution first, and only then consider the atomicity problem (if it still exists at all) in your solution.</strong></li>
+<li>For the tests which contain a larger number of circles - <code>rand1M</code> and <code>micro2M</code> - you should be careful about allocating temporary structures in global memory. If you allocate too much global memory, you will have used up all the memory on the device. If you are not checking the <code>cudaError_t</code> value that is returned from a call to <code>cudaMalloc</code>, then the program will still execute but you will not know that you ran out of device memory. Instead, you will fail the correctness check because you were not able to make your temporary structures. This is why we suggest you to use the CUDA API call wrapper below so you can wrap your <code>cudaMalloc</code> calls and produce an error when you run out of device memory.</li>
+<li>If you find yourself with free time, have fun making your own scenes!</li>
+</ul>
+<h3 id="catching-cuda-errors">Catching CUDA Errors</h3>
+<p>By default, if you access an array out of bounds, allocate too much memory, or otherwise cause an error, CUDA won&#39;t normally inform you; instead it will just fail silently and return an error code. You can use the following macro (feel free to modify it) to wrap CUDA calls:</p>
+<pre><code><span class="hljs-meta">#<span class="hljs-meta-keyword">define</span> DEBUG</span>
+
+<span class="hljs-meta">#<span class="hljs-meta-keyword">ifdef</span> DEBUG</span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">define</span> cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }</span>
+<span class="hljs-function"><span class="hljs-keyword">inline</span> <span class="hljs-keyword">void</span> <span class="hljs-title">cudaAssert</span><span class="hljs-params">(cudaError_t code, <span class="hljs-keyword">const</span> <span class="hljs-keyword">char</span> *file, <span class="hljs-keyword">int</span> line, <span class="hljs-keyword">bool</span> <span class="hljs-built_in">abort</span>=<span class="hljs-literal">true</span>)</span>
+</span>{
+   <span class="hljs-keyword">if</span> (code != cudaSuccess)
+   {
+      <span class="hljs-built_in">fprintf</span>(<span class="hljs-built_in">stderr</span>, <span class="hljs-string">"CUDA Error: %s at %s:%d\n"</span>,
+        cudaGetErrorString(code), file, line);
+      <span class="hljs-keyword">if</span> (<span class="hljs-built_in">abort</span>) <span class="hljs-built_in">exit</span>(code);
+   }
+}
+<span class="hljs-meta">#<span class="hljs-meta-keyword">else</span></span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">define</span> cudaCheckError(ans) ans</span>
+<span class="hljs-meta">#<span class="hljs-meta-keyword">endif</span></span>
+</code></pre><p>Note that you can undefine DEBUG to disable error checking once your code is correct for improved performance.</p>
+<p>You can then wrap CUDA API calls to process their returned errors as such:</p>
+<pre><code>cudaCheckError( <span class="hljs-name">cudaMalloc</span>(<span class="hljs-name">&amp;a</span>, size*sizeof(<span class="hljs-name">int</span>)) )<span class="hljs-comment">;</span>
+</code></pre><p>Note that you can&#39;t wrap kernel launches directly. Instead, their errors will be caught on the next CUDA call you wrap:</p>
+<pre><code>kernel&lt;&lt;&lt;<span class="hljs-number">1</span>,<span class="hljs-number">1</span>&gt;&gt;&gt;(a); <span class="hljs-comment">// suppose kernel causes an error!</span>
+cudaCheckError( cudaDeviceSynchronize() ); <span class="hljs-comment">// error is printed on this line</span>
+</code></pre><p>All CUDA API functions, <code>cudaDeviceSynchronize</code>, <code>cudaMemcpy</code>, <code>cudaMemset</code>, and so on can be wrapped.</p>
+<p><strong>IMPORTANT:</strong> if a CUDA function error&#39;d previously, but wasn&#39;t caught, that error will show up in the next error check, even if that wraps a different function. For example:</p>
+<pre><code>...
+line 742: cudaMalloc(&amp;a, -<span class="hljs-number">1</span>); <span class="hljs-comment">// executes, then continues</span>
+line 743: cudaCheckError(cudaMemcpy(a,b)); <span class="hljs-comment">// prints "CUDA Error: out of memory at cudaRenderer.cu:743"</span>
+...
+</code></pre><p>Therefore, while debugging, it&#39;s recommended that you wrap <strong>all</strong> CUDA API calls (at least in code that you wrote).</p>
+<p>(Credit: adapted from <a href="https://stackoverflow.com/questions/14038589/what-is-the-canonical-way-to-check-for-errors-using-the-cuda-runtime-api">this Stack Overflow post</a>)</p>
+   </body>
+</html>
