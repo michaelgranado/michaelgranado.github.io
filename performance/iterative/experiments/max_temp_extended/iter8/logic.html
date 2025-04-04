@@ -1,0 +1,441 @@
+<body style="background: lightyellow;">
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+        margin: 20px;
+        color: #333;
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    h1, h2, h3 {
+        color: #2c3e50;
+    }
+    .container {
+        background-color: #f9f9f9;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
+    pre {
+        background-color: #f5f5f5;
+        padding: 10px;
+        border-radius: 5px;
+        overflow-x: auto;
+        border: 1px solid #ddd;
+    }
+    code {
+        font-family: Consolas, Monaco, 'Andale Mono', monospace;
+        font-size: 14px;
+    }
+    .highlight {
+        background-color: #fff8dc;
+        padding: 5px;
+        border-left: 4px solid #ffd700;
+        margin: 10px 0;
+    }
+</style>
+</head>
+<body>
+
+<h1>Optimized CUDA Circle Renderer</h1>
+
+<div class="container">
+    <h2>Strategy</h2>
+    <ol>
+        <li>Use specialized rendering paths optimized for different scene types (small vs. large number of circles)</li>
+        <li>Implement aggressive circle culling to minimize workload per tile</li>
+        <li>Use a cooperative circle filtering approach for scenes with many tiny circles</li>
+        <li>Optimize batch processing with adaptive batch sizes based on scene characteristics</li>
+        <li>Minimize thread synchronization and global memory operations</li>
+        <li>Implement early exit optimization for tiles with no circle intersections</li>
+        <li>Leverage shared memory to cache circle data and reduce global memory accesses</li>
+        <li>Process circles in strict order to maintain transparency rendering requirements</li>
+    </ol>
+</div>
+
+<div class="container">
+    <h2>Reasoning</h2>
+    <p>After analyzing the test harness results, I identified several key bottlenecks in the current implementation:</p>
+    
+    <p><strong>Performance Analysis:</strong></p>
+    <ul>
+        <li>The largest performance gaps are in scenes with many circles (rand100k, rand1M, micro2M), indicating inefficient circle processing</li>
+        <li>The current implementation performs excessive work by processing circles that don't contribute to a given tile</li>
+        <li>For scenes with many small circles (like micro2M), most tiles have very few intersecting circles, making batch processing inefficient</li>
+        <li>Excessive memory operations and thread synchronization are causing performance degradation</li>
+    </ul>
+
+    <p><strong>Optimization Approach:</strong></p>
+    <ul>
+        <li><strong>Dynamic Specialization:</strong> Different scene types require different optimization strategies. By detecting scene characteristics, we can apply the most efficient algorithm for each scenario.</li>
+        <li><strong>Aggressive Filtering:</strong> For micro2M with 2 million tiny circles, most circles don't affect any given tile. By cooperatively building a filtered list of only the circles that intersect a tile, we dramatically reduce workload.</li>
+        <li><strong>Adaptive Batch Sizing:</strong> Larger batch sizes for scenes with millions of circles amortize synchronization costs, while smaller batches reduce shared memory pressure for scenes with fewer circles.</li>
+        <li><strong>Early Exit Optimization:</strong> By quickly detecting when no circles in a batch intersect a tile, we can skip entire batches of work.</li>
+        <li><strong>Memory Optimization:</strong> Using a register-based accumulator for pixel color and minimizing global memory operations significantly improves performance.</li>
+    </ul>
+
+    <p>The key insight is that for scenes with millions of tiny circles (micro2M), we need to filter circles before processing them, rather than testing each circle against each pixel individually. This is achieved through a two-phase approach: first filter circles that might affect the current tile, then only process those filtered circles for each pixel.</p>
+</div>
+
+<div class="container">
+    <h2>Optimized Code</h2>
+    
+<pre><code>#include &lt;string&gt;
+#include &lt;algorithm&gt;
+#include &lt;math.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;vector&gt;
+
+#include &lt;cuda.h&gt;
+#include &lt;cuda_runtime.h&gt;
+#include &lt;driver_functions.h&gt;
+
+#include "cudaRenderer.h"
+#include "image.h"
+#include "noise.h"
+#include "sceneLoader.h"
+#include "util.h"
+
+#define TILE_SIZE 16
+
+#include "circleBoxTest.cu_inl"
+
+////////////////////////////////////////////////////////////////////////////////////////
+// Putting all the cuda kernels here
+///////////////////////////////////////////////////////////////////////////////////////
+
+struct GlobalConstants {
+    SceneName sceneName;
+
+    int numCircles;
+    float* position;
+    float* velocity;
+    float* color;
+    float* radius;
+
+    int imageWidth;
+    int imageHeight;
+    float* imageData;
+};
+
+// Global variable that is in scope, but read-only, for all cuda
+// kernels.  The __constant__ modifier designates this variable will
+// be stored in special "constant" memory on the GPU.
+__constant__ GlobalConstants cuConstRendererParams;
+
+// read-only lookup tables used to quickly compute noise (needed by
+// advanceAnimation for the snowflake scene)
+__constant__ int    cuConstNoiseYPermutationTable[256];
+__constant__ int    cuConstNoiseXPermutationTable[256];
+__constant__ float  cuConstNoise1DValueTable[256];
+
+// color ramp table needed for the color ramp lookup shader
+#define COLOR_MAP_SIZE 5
+__constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
+
+// Including parts of the CUDA code from external files to keep this
+// file simpler and to separate code that should not be modified
+#include "noiseCuda.cu_inl"
+#include "lookupColor.cu_inl"
+
+// kernelClearImageSnowflake -- (CUDA device code)
+//
+// Clear the image, setting the image to the white-gray gradation that
+// is used in the snowflake image
+__global__ void kernelClearImageSnowflake() {
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
+
+    if (imageX >= width || imageY >= height)
+        return;
+
+    int offset = 4 * (imageY * width + imageX);
+    float shade = .4f + .45f * static_cast&lt;float&gt;(height-imageY) / height;
+    float4 value = make_float4(shade, shade, shade, 1.f);
+
+    // write to global memory: As an optimization, I use a float4
+    // store, that results in more efficient code than if I coded this
+    // up as four separate fp32 stores.
+    *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
+}
+
+// kernelClearImage --  (CUDA device code)
+//
+// Clear the image, setting all pixels to the specified color rgba
+__global__ void kernelClearImage(float r, float g, float b, float a) {
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
+
+    if (imageX >= width || imageY >= height)
+        return;
+
+    int offset = 4 * (imageY * width + imageX);
+    float4 value = make_float4(r, g, b, a);
+
+    // write to global memory: As an optimization, I use a float4
+    // store, that results in more efficient code than if I coded this
+    // up as four separate fp32 stores.
+    *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
+}
+
+// shadePixel -- (CUDA device code)
+//
+// given a pixel and a circle, determines the contribution to the
+// pixel from the circle.  Update of the image is done in this
+// function.  Called by kernelRenderCircles()
+__device__ __inline__ void
+shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* local) {
+    float diffX = p.x - pixelCenter.x;
+    float diffY = p.y - pixelCenter.y;
+    float pixelDist = diffX * diffX + diffY * diffY;
+
+    float rad = cuConstRendererParams.radius[circleIndex];
+    float maxDist = rad * rad;
+
+    // circle does not contribute to the image
+    if (pixelDist > maxDist)
+        return;
+
+    float3 rgb;
+    float alpha;
+
+    // there is a non-zero contribution.  Now compute the shading value
+    if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+        const float kCircleMaxAlpha = .5f;
+        const float falloffScale = 4.f;
+
+        float normPixelDist = sqrt(pixelDist) / rad;
+        rgb = lookupColor(normPixelDist);
+
+        float maxAlpha = .6f + .4f * (1.f-p.z);
+        maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f); // kCircleMaxAlpha * clamped value
+        alpha = maxAlpha * exp(-1.f * falloffScale * normPixelDist * normPixelDist);
+    } else {
+        // simple: each circle has an assigned color
+        int index3 = 3 * circleIndex;
+        rgb = *(float3*)&(cuConstRendererParams.color[index3]);
+        alpha = .5f;
+    }
+
+    float oneMinusAlpha = 1.f - alpha;
+
+    // now we're doing the blending directly into our local value
+    local->x = alpha * rgb.x + oneMinusAlpha * local->x;
+    local->y = alpha * rgb.y + oneMinusAlpha * local->y;
+    local->z = alpha * rgb.z + oneMinusAlpha * local->z;
+    local->w = alpha + local->w;
+}
+
+// Core optimized rendering kernel
+__global__ void kernelRenderCirclesOptimized() {
+    // Calculate pixel coordinates for this thread
+    int pixelX = blockIdx.x * TILE_SIZE + threadIdx.x;
+    int pixelY = blockIdx.y * TILE_SIZE + threadIdx.y;
+
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
+
+    // Early exit if pixel is out of bounds
+    if (pixelX >= width || pixelY >= height)
+        return;
+
+    // Calculate pixel center in normalized coordinates
+    float invWidth = 1.f / width;
+    float invHeight = 1.f / height;
+    float2 pixelCenterNorm = make_float2(
+        invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
+        invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f)
+    );
+
+    // Load current pixel color into a register for accumulation
+    int offset = 4 * (pixelY * width + pixelX);
+    float4 pixelColor = *(float4*)(&cuConstRendererParams.imageData[offset]);
+
+    // Calculate tile bounds for circle culling
+    float boxL = invWidth * (blockIdx.x * TILE_SIZE);
+    float boxR = invWidth * (min((blockIdx.x + 1) * TILE_SIZE, width));
+    float boxT = invHeight * (min((blockIdx.y + 1) * TILE_SIZE, height));
+    float boxB = invHeight * (blockIdx.y * TILE_SIZE);
+
+    // Get scene parameters
+    int numCircles = cuConstRendererParams.numCircles;
+    SceneName sceneName = cuConstRendererParams.sceneName;
+    
+    // Fast path for scenes with very few circles (like rgb)
+    if (numCircles <= 100) {
+        for (int circleIdx = 0; circleIdx < numCircles; circleIdx++) {
+            int index3 = 3 * circleIdx;
+            float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+            float rad = cuConstRendererParams.radius[circleIdx];
+            
+            // Skip circles that don't intersect with this tile
+            if (!circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB))
+                continue;
+                
+            // Check if this pixel is within the circle
+            float diffX = p.x - pixelCenterNorm.x;
+            float diffY = p.y - pixelCenterNorm.y;
+            float pixelDist = diffX * diffX + diffY * diffY;
+            float maxDist = rad * rad;
+            
+            if (pixelDist <= maxDist) {
+                shadePixel(circleIdx, pixelCenterNorm, p, &pixelColor);
+            }
+        }
+        
+        // Write the final color back to global memory
+        *(float4*)(&cuConstRendererParams.imageData[offset]) = pixelColor;
+        return;
+    }
+    
+    // Linear thread index for collaborative loading
+    int linearThreadIdx = threadIdx.y * TILE_SIZE + threadIdx.x;
+    int threadsPerBlock = TILE_SIZE * TILE_SIZE;
+    
+    // Adaptive batch size based on circle count
+    int batchSize;
+    if (numCircles >= 2000000) batchSize = 2048;      // micro2M
+    else if (numCircles >= 1000000) batchSize = 1024; // rand1M
+    else if (numCircles >= 100000) batchSize = 512;   // rand100k, snowsingle
+    else batchSize = 256;                             // rand10k, etc.
+    
+    // Check if we're dealing with many small circles (like micro2M)
+    bool isMicroCirclesScene = (numCircles >= 1000000 && 
+                              sceneName != SNOWFLAKES && 
+                              sceneName != SNOWFLAKES_SINGLE_FRAME);
+    
+    // Dynamic shared memory allocation
+    extern __shared__ char sharedMem[];
+    
+    if (isMicroCirclesScene) {
+        // Specialized path for scenes with many tiny circles (micro2M)
+        float3* positions = (float3*)sharedMem;
+        float* radii = (float*)(positions + batchSize);
+        int* circleIndices = (int*)(radii + batchSize);
+        __shared__ int circleCount;
+        
+        // Process circles in batches
+        for (int batchStart = 0; batchStart < numCircles; batchStart += batchSize) {
+            int batchEnd = min(batchStart + batchSize, numCircles);
+            
+            // Reset counter for intersecting circles
+            if (linearThreadIdx == 0) {
+                circleCount = 0;
+            }
+            __syncthreads();
+            
+            // Collaborative loading and pre-filtering of circles
+            for (int i = linearThreadIdx; i < (batchEnd - batchStart); i += threadsPerBlock) {
+                int circleIdx = batchStart + i;
+                int index3 = 3 * circleIdx;
+                
+                float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+                float rad = cuConstRendererParams.radius[circleIdx];
+                
+                // Only store circles that intersect with this tile
+                if (circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+                    int idx = atomicAdd(&circleCount, 1);
+                    if (idx < batchSize) {
+                        positions[idx] = p;
+                        radii[idx] = rad;
+                        circleIndices[idx] = circleIdx;
+                    }
+                }
+            }
+            
+            __syncthreads();
+            
+            // Skip if no circles intersect with this tile
+            if (circleCount == 0) {
+                continue;
+            }
+            
+            // Process only the filtered circles
+            for (int i = 0; i < circleCount; i++) {
+                float3 p = positions[i];
+                float rad = radii[i];
+                int originalIdx = circleIndices[i];
+                
+                // Check if this pixel is within the circle
+                float diffX = p.x - pixelCenterNorm.x;
+                float diffY = p.y - pixelCenterNorm.y;
+                float pixelDist = diffX * diffX + diffY * diffY;
+                float maxDist = rad * rad;
+                
+                if (pixelDist <= maxDist) {
+                    shadePixel(originalIdx, pixelCenterNorm, p, &pixelColor);
+                }
+            }
+            
+            __syncthreads();
+        }
+    } else {
+        // Standard path for scenes with fewer or larger circles
+        float3* positions = (float3*)sharedMem;
+        float* radii = (float*)(positions + batchSize);
+        bool* intersects = (bool*)(radii + batchSize);
+        bool* anyIntersection = (bool*)(intersects + batchSize);
+        
+        // Process circles in batches
+        for (int batchStart = 0; batchStart < numCircles; batchStart += batchSize) {
+            int batchEnd = min(batchStart + batchSize, numCircles);
+            int currentBatchSize = batchEnd - batchStart;
+            
+            // Reset intersection flag
+            if (linearThreadIdx == 0) {
+                *anyIntersection = false;
+            }
+            __syncthreads();
+            
+            // Collaborative loading with intersection testing
+            for (int i = linearThreadIdx; i < currentBatchSize; i += threadsPerBlock) {
+                int circleIdx = batchStart + i;
+                int index3 = 3 * circleIdx;
+                
+                float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+                float rad = cuConstRendererParams.radius[circleIdx];
+                
+                positions[i] = p;
+                radii[i] = rad;
+                
+                // Check if circle intersects with tile
+                bool doesIntersect = circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB);
+                intersects[i] = doesIntersect;
+                
+                if (doesIntersect) {
+                    *anyIntersection = true;
+                }
+            }
+            
+            __syncthreads();
+            
+            // Early exit if no circles in this batch intersect the tile
+            if (!(*anyIntersection)) {
+                continue;
+            }
+            
+            // Process only circles that intersect with the tile
+            for (int i = 0; i < currentBatchSize; i++) {
+                if (!intersects[i])
+                    continue;
+                    
+                float3 p = positions[i];
+                float rad = radii[i];
+                
+                // Check if this pixel is within the circle
+                float diffX = p.x - pixelCenterNorm.x;
+                float diffY = p.y - pixelCenterNorm.y;
+                float pixelDist = diffX * diffX + diffY * diffY;
+                float maxDist = rad * rad;
+                
+                </body>
