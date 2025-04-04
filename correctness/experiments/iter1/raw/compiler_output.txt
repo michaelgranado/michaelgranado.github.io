@@ -4,24 +4,6 @@ g++ display.cpp -O3 -Wall -g -c -o objs/display.o
 nvcc benchmark.cu -O3 -m64 -c -o objs/benchmark.o
 g++ refRenderer.cpp -O3 -Wall -g -c -o objs/refRenderer.o
 nvcc cudaRenderer.cu -O3 -m64 -c -o objs/cudaRenderer.o
-cudaRenderer.cu(668): warning #177-D: variable "boxL" was declared but never referenced
-          float boxL = p.x - rad;
-                ^
-
-Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
-
-cudaRenderer.cu(669): warning #177-D: variable "boxR" was declared but never referenced
-          float boxR = p.x + rad;
-                ^
-
-cudaRenderer.cu(670): warning #177-D: variable "boxB" was declared but never referenced
-          float boxB = p.y - rad;
-                ^
-
-cudaRenderer.cu(671): warning #177-D: variable "boxT" was declared but never referenced
-          float boxT = p.y + rad;
-                ^
-
 g++ noise.cpp -O3 -Wall -g -c -o objs/noise.o
 g++ ppm.cpp -O3 -Wall -g -c -o objs/ppm.o
 g++ sceneLoader.cpp -O3 -Wall -g -c -o objs/sceneLoader.o

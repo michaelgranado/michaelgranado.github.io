@@ -10,7 +10,7 @@ You are a Teaching Assistant for a Parallel Computing course at Stanford Univers
 Answer using the following schema:
 strategy: A detailed strategy to complete the assignment that should be created before writing any actual code.
 reasoning: Detailed reasoning of the strategy and why you chose this strategy. You should throughly justify why you made this strategy and what intuition you had.
-code: The code generated according to the strategy and reasoning. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Do not output testing code. You should also not worry about efficiency and should ONLY worry about correctness.
+code: The code generated according to the strategy and reasoning. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Do not output testing code. You should also not worry about efficiency and should ONLY worry about correctness. Do not forget that the code generated should STRICTLY FOLLOW the strategy and reasoning you have created.
 
 ### Instructions:
 &lt;instructions&gt;
@@ -61,6 +61,10 @@ Description: A test scene containing 2M randomily placed circles, each with an e
 &lt;supplementary_code_2&gt;
 {suppl_two}
 &lt;/supplementary_code_2&gt;
+
+&lt;supplementary_code_3&gt;
+{suppl_three}
+&lt;/supplementary_code_3&gt;
        </pre>
        <a href="./prompt_files/instructions.html">Instructions</a>
        <br>
@@ -69,6 +73,9 @@ Description: A test scene containing 2M randomily placed circles, each with an e
        <a href="./prompt_files/supplementary_code_1.html">Supplementary Code #1</a>
        <br>
        <a href="./prompt_files/supplementary_code_2.html">Supplementary Code #2</a>       
+       <br>
+       <a href="./prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
+       
        <h2>User Prompt</h2>
        <pre style="white-space: pre-wrap; word-break: keep-all;">
 Propose a new renderer (including strategy, reasoning, code) which ensures the program returns the correct result. You should not worry about performance, ONLY correctness. Please output your response in an HTML format.

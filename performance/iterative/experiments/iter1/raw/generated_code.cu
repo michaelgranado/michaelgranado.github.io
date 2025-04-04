@@ -1,37 +1,3 @@
-<h1>CUDA Circle Renderer Implementation</h1>
-
-<h2>Strategy</h2>
-<p>To implement a correct CUDA renderer for the circle drawing task, I'll focus on addressing the two main issues with the current implementation:</p>
-<ol>
-  <li><strong>Atomicity</strong>: Ensure that all image update operations are atomic, including reading the pixel's RGBA values, blending the circle's contribution, and writing back to memory.</li>
-  <li><strong>Order</strong>: Ensure that updates to pixels are performed in circle input order. If multiple circles contribute to the same pixel, the updates must be applied in the order the circles are provided.</li>
-</ol>
-
-<p>My strategy will be:</p>
-<ol>
-  <li>Keep the pixel-parallelism approach (rather than circle-parallelism) to ensure proper ordering of circle processing.</li>
-  <li>Process all pixels in parallel, but for each pixel, process circles sequentially in the given order.</li>
-  <li>For each pixel, create a local accumulator to avoid multiple reads/writes to global memory.</li>
-  <li>Only write the final color to the image buffer once all circles have been processed for a pixel.</li>
-</ol>
-
-<h2>Reasoning</h2>
-<p>The current implementation assigns one thread to each circle, which doesn't guarantee processing order when multiple circles affect the same pixel. My approach will instead assign threads to pixels and have each thread process all circles for its pixel sequentially.</p>
-
-<p>This strategy naturally preserves the order requirement since each pixel is processed by a single thread, and that thread will process circles in the input order. Atomicity is ensured since there's no contention for writing to a pixel's location - only one thread is responsible for each pixel.</p>
-
-<p>The key insight is that we can flip the parallelism strategy: instead of parallelizing over circles and having race conditions when writing to pixels, we'll parallelize over pixels and have each thread handle all circles sequentially. This approach:
-<ul>
-  <li>Ensures circle processing order is preserved for each pixel</li>
-  <li>Eliminates the need for atomic operations or locks</li>
-  <li>Avoids race conditions in updating the image buffer</li>
-  <li>Maintains a proper implementation of the transparency blending model</li>
-</ul>
-</p>
-
-<h2>Code</h2>
-
-```cpp
 #include <string>
 #include <algorithm>
 #include <math.h>
@@ -350,19 +316,19 @@ __global__ void kernelAdvanceSnowflake() {
 // given a pixel and a circle, determines the contribution to the
 // pixel from the circle.  Update of the image is done in this
 // function.  Called by kernelRenderCircles()
-__device__ __inline__ void
-shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* local) {
+__device__ __inline__ float4
+shadePixelRGBA(int circleIndex, float2 pixelCenter, float3 p) {
 
     float diffX = p.x - pixelCenter.x;
     float diffY = p.y - pixelCenter.y;
     float pixelDist = diffX * diffX + diffY * diffY;
 
-    float rad = cuConstRendererParams.radius[circleIndex];;
+    float rad = cuConstRendererParams.radius[circleIndex];
     float maxDist = rad * rad;
 
     // circle does not contribute to the image
     if (pixelDist > maxDist)
-        return;
+        return make_float4(0.f, 0.f, 0.f, 0.f);
 
     float3 rgb;
     float alpha;
@@ -394,71 +360,87 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* local) {
         alpha = .5f;
     }
 
-    float oneMinusAlpha = 1.f - alpha;
-
-    // now we're doing the blending directly into our local value
-    local->x = alpha * rgb.x + oneMinusAlpha * local->x;
-    local->y = alpha * rgb.y + oneMinusAlpha * local->y;
-    local->z = alpha * rgb.z + oneMinusAlpha * local->z;
-    local->w = alpha + local->w;
+    return make_float4(rgb.x, rgb.y, rgb.z, alpha);
 }
 
-// kernelRenderCircles -- (CUDA device code)
+// blendPixel -- (CUDA device code)
 //
-// Render all circles on the image. Each thread renders a single pixel.
-// For each pixel, the thread checks all circles to see if they contribute
-// to the color of the pixel, respecting the order requirement.
-__global__ void kernelRenderCircles() {
+// Given the current pixel value and a new color+alpha contribution,
+// blend them together properly
+__device__ __inline__ float4
+blendPixel(float4 currentColor, float4 newColor) {
+    // This is the blend operation from the original shadePixel
+    float oneMinusAlpha = 1.f - newColor.w;
+    
+    float4 blendedColor;
+    blendedColor.x = newColor.w * newColor.x + oneMinusAlpha * currentColor.x;
+    blendedColor.y = newColor.w * newColor.y + oneMinusAlpha * currentColor.y;
+    blendedColor.z = newColor.w * newColor.z + oneMinusAlpha * currentColor.z;
+    blendedColor.w = newColor.w + currentColor.w;
+    
+    return blendedColor;
+}
+
+// kernelRenderPixels -- (CUDA device code)
+//
+// This is a pixel-centric approach where each thread processes one pixel.
+// It ensures both atomicity and order requirements are met.
+__global__ void kernelRenderPixels() {
     int imageX = blockIdx.x * blockDim.x + threadIdx.x;
     int imageY = blockIdx.y * blockDim.y + threadIdx.y;
-
+    
     int width = cuConstRendererParams.imageWidth;
     int height = cuConstRendererParams.imageHeight;
-
+    
     if (imageX >= width || imageY >= height)
         return;
-
-    // Create a local accumulator for this pixel
-    float4 pixelColor = make_float4(0.f, 0.f, 0.f, 0.f);
     
-    // Get current image color from global memory
-    int offset = 4 * (imageY * width + imageX);
-    pixelColor = *(float4*)(&cuConstRendererParams.imageData[offset]);
-    
-    // Normalized pixel center position
+    // Calculate pixel center
     float invWidth = 1.f / width;
     float invHeight = 1.f / height;
-    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(imageX) + 0.5f),
-                                          invHeight * (static_cast<float>(imageY) + 0.5f));
+    float2 pixelCenter = make_float2(invWidth * (static_cast<float>(imageX) + 0.5f),
+                                     invHeight * (static_cast<float>(imageY) + 0.5f));
     
-    // Process all circles in order, accumulating their contributions to this pixel
-    for (int circleIdx = 0; circleIdx < cuConstRendererParams.numCircles; circleIdx++) {
-        int index3 = 3 * circleIdx;
+    // Pixel's address in the output image
+    int offset = 4 * (imageY * width + imageX);
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[offset]);
+    
+    // Start with the current pixel color
+    float4 pixelColor = *imgPtr;
+    
+    // Process all circles in order
+    for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
+        int index3 = 3 * circleIndex;
         
         // Read position and radius
         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-        float rad = cuConstRendererParams.radius[circleIdx];
+        float rad = cuConstRendererParams.radius[circleIndex];
         
-        // Bounding box test - check if this pixel is within the bounding box of the circle
-        // Convert circle center to pixel coordinates
-        float circleX = p.x;
-        float circleY = p.y;
+        // Check if this circle could possibly contribute to this pixel
+        // using circleInBoxConservative to avoid unnecessary computation
+        short imageWidth = cuConstRendererParams.imageWidth;
+        short imageHeight = cuConstRendererParams.imageHeight;
         
-        // Skip circle if it doesn't affect this pixel
-        if (!circleInBoxConservative(circleX, circleY, rad, 
-                                    pixelCenterNorm.x - invWidth/2, 
-                                    pixelCenterNorm.x + invWidth/2,
-                                    pixelCenterNorm.y + invHeight/2, 
-                                    pixelCenterNorm.y - invHeight/2))
-            continue;
+        // Compute test box coordinates (pixel position)
+        float boxL = invWidth * imageX;
+        float boxR = invWidth * (imageX + 1);
+        float boxT = invHeight * (imageY + 1);
+        float boxB = invHeight * imageY;
         
-        // Circle might affect this pixel, check if the pixel center is inside the circle
-        // and compute shading if it is
-        shadePixel(circleIdx, pixelCenterNorm, p, &pixelColor);
+        // Quick conservative test
+        if (circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+            // Compute the color contribution from this circle
+            float4 circleColor = shadePixelRGBA(circleIndex, pixelCenter, p);
+            
+            // Only blend if this circle actually contributes to the pixel
+            if (circleColor.w > 0.f) {
+                pixelColor = blendPixel(pixelColor, circleColor);
+            }
+        }
     }
     
-    // Write the final color for this pixel to global memory once
-    *(float4*)(&cuConstRendererParams.imageData[offset]) = pixelColor;
+    // Write the final pixel color back to global memory
+    *imgPtr = pixelColor;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -608,7 +590,6 @@ CudaRenderer::setup() {
     };
 
     cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE);
-
 }
 
 // allocOutputImage --
@@ -669,42 +650,14 @@ CudaRenderer::advanceAnimation() {
 
 void
 CudaRenderer::render() {
-    // Use a 2D grid for parallelizing over pixels
-    dim3 blockDim(16, 16); // 256 threads per block
+    // Use a 2D grid to process all pixels in parallel
+    dim3 blockDim(16, 16);
     dim3 gridDim(
         (image->width + blockDim.x - 1) / blockDim.x,
         (image->height + blockDim.y - 1) / blockDim.y);
-
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    
+    // Launch the pixel-processing kernel
+    kernelRenderPixels<<<gridDim, blockDim>>>();
+    
     cudaDeviceSynchronize();
 }
-```
-
-<h2>Implementation Details</h2>
-<p>The key changes in this implementation compared to the original code are:</p>
-
-<ol>
-  <li><strong>Parallelism Strategy:</strong> Instead of parallelizing over circles (with one thread per circle), we now parallelize over pixels (with one thread per pixel). Each thread processes all circles for its assigned pixel.</li>
-  
-  <li><strong>Kernel Structure:</strong> The rendering kernel now has each thread:
-    <ul>
-      <li>Identify which pixel it's responsible for based on thread/block IDs</li>
-      <li>Create a local accumulator for the pixel color, initialized with the current image value</li>
-      <li>Iterate through all circles in input order, checking if each circle contributes to the pixel</li>
-      <li>Only after processing all circles, write the final color back to the global memory buffer</li>
-    </ul>
-  </li>
-  
-  <li><strong>Bounding Box Test:</strong> I maintained the circle-intersects-box test to efficiently skip circles that don't affect a pixel. This is a crucial optimization when dealing with many circles.</li>
-  
-  <li><strong>Shading Function:</strong> Modified the shading function to update a local color accumulator instead of directly writing to global memory, which ensures both atomicity and order.</li>
-</ol>
-
-<p>This implementation correctly handles the order and atomicity requirements since:</p>
-<ul>
-  <li>Each pixel is processed by a single thread, eliminating race conditions</li>
-  <li>Circles are processed in the order they appear in the input array</li>
-  <li>The image is only written to once per pixel, after all contributions are accumulated</li>
-</ul>
-
-<p>The implementation focuses strictly on correctness rather than performance optimizations. By parallelizing per-pixel instead of per-circle, we maintain the correct blending order and avoid race conditions entirely.</p>
