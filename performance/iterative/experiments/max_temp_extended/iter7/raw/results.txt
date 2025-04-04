@@ -1,56 +1,56 @@
 Running scene: rgb...
 [rgb] Correctness passed!
-[rgb] Student times:  [0.2626, 0.2653, 0.2643]
-[rgb] Reference times:  [0.2668, 0.2637, 0.2634]
+[rgb] Student times:  [0.2619, 0.2622, 0.2613]
+[rgb] Reference times:  [0.2644, 0.2629, 0.2667]
 
 Running scene: rand10k...
 [rand10k] Correctness passed!
-[rand10k] Student times:  [14.8798, 14.8626, 14.8696]
-[rand10k] Reference times:  [2.7356, 2.7322, 2.7293]
+[rand10k] Student times:  [14.481, 14.4807, 14.4852]
+[rand10k] Reference times:  [2.7349, 2.7336, 2.7311]
 
 Running scene: rand100k...
 [rand100k] Correctness passed!
-[rand100k] Student times:  [155.7768, 155.9672, 156.1985]
-[rand100k] Reference times:  [26.0544, 25.9592, 26.069]
+[rand100k] Student times:  [156.2002, 155.4471, 156.2123]
+[rand100k] Reference times:  [26.0588, 26.0369, 26.1752]
 
 Running scene: pattern...
 [pattern] Correctness passed!
-[pattern] Student times:  [1.8469, 1.8462, 1.8478]
-[pattern] Reference times:  [0.3574, 0.3576, 0.3556]
+[pattern] Student times:  [0.9556, 0.9543, 0.9537]
+[pattern] Reference times:  [0.3564, 0.3574, 0.3557]
 
 Running scene: snowsingle...
 [snowsingle] Correctness passed!
-[snowsingle] Student times:  [144.6615, 144.7421, 144.6552]
-[snowsingle] Reference times:  [16.0736, 16.1112, 16.044]
+[snowsingle] Student times:  [27.5257, 27.6406, 27.6141]
+[snowsingle] Reference times:  [16.0392, 16.0717, 16.1066]
 
 Running scene: biglittle...
 [biglittle] Correctness passed!
-[biglittle] Student times:  [27.4887, 27.712, 27.5222]
-[biglittle] Reference times:  [14.8265, 14.9078, 14.9919]
+[biglittle] Student times:  [26.3852, 26.3607, 26.5015]
+[biglittle] Reference times:  [14.9088, 15.0145, 15.0414]
 
 Running scene: rand1M...
 [rand1M] Correctness passed!
-[rand1M] Student times:  [1499.5326, 1505.1683, 1512.6985]
-[rand1M] Reference times:  [189.8234, 192.6376, 191.44]
+[rand1M] Student times:  [1414.1754, 1421.9788, 1428.4879]
+[rand1M] Reference times:  [193.9155, 189.5906, 192.2342]
 
 Running scene: micro2M...
 [micro2M] Correctness passed!
-[micro2M] Student times:  [3028.3022, 3043.3636, 3056.8152]
-[micro2M] Reference times:  [362.2662, 361.6653, 362.1444]
+[micro2M] Student times:  [1175.6571, 1177.821, 1180.522]
+[micro2M] Reference times:  [358.9496, 358.719, 358.9097]
 ------------
 Score table:
 ------------
 --------------------------------------------------------------------------
 | Scene Name      | Ref Time (T_ref) | Your Time (T)   | Score           |
 --------------------------------------------------------------------------
-| rgb             | 0.2634           | 0.2626          | 9               |
-| rand10k         | 2.7293           | 14.8626         | 4               |
-| rand100k        | 25.9592          | 155.7768        | 4               |
-| pattern         | 0.3556           | 1.8462          | 4               |
-| snowsingle      | 16.044           | 144.6552        | 3               |
-| biglittle       | 14.8265          | 27.4887         | 6               |
-| rand1M          | 189.8234         | 1499.5326       | 3               |
-| micro2M         | 361.6653         | 3028.3022       | 3               |
+| rgb             | 0.2629           | 0.2613          | 9               |
+| rand10k         | 2.7311           | 14.4807         | 4               |
+| rand100k        | 26.0369          | 155.4471        | 4               |
+| pattern         | 0.3557           | 0.9537          | 5               |
+| snowsingle      | 16.0392          | 27.5257         | 7               |
+| biglittle       | 14.9088          | 26.3607         | 6               |
+| rand1M          | 189.5906         | 1414.1754       | 3               |
+| micro2M         | 358.719          | 1175.6571       | 5               |
 --------------------------------------------------------------------------
-|                                    | Total score:    | 36/72           |
+|                                    | Total score:    | 43/72           |
 --------------------------------------------------------------------------
