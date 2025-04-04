@@ -1,56 +1,56 @@
 Running scene: rgb...
-[rgb] Correctness failed ... Check ./logs/correctness_rgb.log
-[rgb] Student times:  [0.8948, 0.8784, 0.8648]
-[rgb] Reference times:  [0.2644, 0.2636, 0.2622]
+[rgb] Correctness passed!
+[rgb] Student times:  [0.2613, 0.2621, 0.2693]
+[rgb] Reference times:  [0.2676, 0.2632, 0.2618]
 
 Running scene: rand10k...
-[rand10k] Correctness failed ... Check ./logs/correctness_rand10k.log
-[rand10k] Student times:  [1.7828, 1.8042, 1.7723]
-[rand10k] Reference times:  [2.7382, 2.7443, 2.7437]
+[rand10k] Correctness passed!
+[rand10k] Student times:  [42.0895, 42.2938, 42.051]
+[rand10k] Reference times:  [2.7359, 2.7324, 2.7401]
 
 Running scene: rand100k...
-[rand100k] Correctness failed ... Check ./logs/correctness_rand100k.log
-[rand100k] Student times:  [10.4426, 10.4604, 10.4665]
-[rand100k] Reference times:  [26.0218, 26.0484, 26.0118]
+[rand100k] Correctness passed!
+[rand100k] Student times:  [483.6692, 484.5278, 485.1349]
+[rand100k] Reference times:  [26.0739, 25.9982, 26.1155]
 
 Running scene: pattern...
-[pattern] Correctness failed ... Check ./logs/correctness_pattern.log
-[pattern] Student times:  [0.568, 0.5617, 0.5747]
-[pattern] Reference times:  [0.3578, 0.3552, 0.3572]
+[pattern] Correctness passed!
+[pattern] Student times:  [4.8063, 4.8045, 4.795]
+[pattern] Reference times:  [0.3569, 0.3607, 0.3589]
 
 Running scene: snowsingle...
-[snowsingle] Correctness failed ... Check ./logs/correctness_snowsingle.log
-[snowsingle] Student times:  [0.9813, 0.9659, 0.9936]
-[snowsingle] Reference times:  [16.1478, 16.1435, 16.1464]
+[snowsingle] Correctness passed!
+[snowsingle] Student times:  [465.0699, 465.6665, 466.1846]
+[snowsingle] Reference times:  [16.0768, 16.0778, 16.1152]
 
 Running scene: biglittle...
-[biglittle] Correctness failed ... Check ./logs/correctness_biglittle.log
-[biglittle] Student times:  [11.1119, 11.1136, 11.111]
-[biglittle] Reference times:  [14.8045, 14.9581, 15.0165]
+[biglittle] Correctness passed!
+[biglittle] Student times:  [49.0242, 48.5713, 48.9009]
+[biglittle] Reference times:  [14.787, 14.7931, 14.9543]
 
 Running scene: rand1M...
-[rand1M] Correctness failed ... Check ./logs/correctness_rand1M.log
-[rand1M] Student times:  [11.6466, 11.7357, 11.6973]
-[rand1M] Reference times:  [188.2133, 188.6077, 188.5532]
+[rand1M] Correctness passed!
+[rand1M] Student times:  [5113.0983, 5183.6722, 5223.9893]
+[rand1M] Reference times:  [194.0999, 195.4847, 193.7757]
 
 Running scene: micro2M...
-[micro2M] Correctness failed ... Check ./logs/correctness_micro2M.log
-[micro2M] Student times:  [7.3988, 7.3948, 7.3971]
-[micro2M] Reference times:  [350.2449, 351.0528, 352.0112]
+[micro2M] Correctness passed!
+[micro2M] Student times:  [10667.344, 10801.3919, 10867.647]
+[micro2M] Reference times:  [372.515, 371.7046, 372.2492]
 ------------
 Score table:
 ------------
 --------------------------------------------------------------------------
 | Scene Name      | Ref Time (T_ref) | Your Time (T)   | Score           |
 --------------------------------------------------------------------------
-| rgb             | 0.2622           | (F)             | 0               |
-| rand10k         | 2.7382           | (F)             | 0               |
-| rand100k        | 26.0118          | (F)             | 0               |
-| pattern         | 0.3552           | (F)             | 0               |
-| snowsingle      | 16.1435          | (F)             | 0               |
-| biglittle       | 14.8045          | (F)             | 0               |
-| rand1M          | 188.2133         | (F)             | 0               |
-| micro2M         | 350.2449         | (F)             | 0               |
+| rgb             | 0.2618           | 0.2613          | 9               |
+| rand10k         | 2.7324           | 42.051          | 2               |
+| rand100k        | 25.9982          | 483.6692        | 2               |
+| pattern         | 0.3569           | 4.795           | 2               |
+| snowsingle      | 16.0768          | 465.0699        | 2               |
+| biglittle       | 14.787           | 48.5713         | 5               |
+| rand1M          | 193.7757         | 5113.0983       | 2               |
+| micro2M         | 371.7046         | 10667.344       | 2               |
 --------------------------------------------------------------------------
-|                                    | Total score:    | 0/72            |
+|                                    | Total score:    | 26/72           |
 --------------------------------------------------------------------------

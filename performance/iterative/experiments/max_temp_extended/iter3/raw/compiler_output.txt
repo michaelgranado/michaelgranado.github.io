@@ -4,17 +4,7 @@ g++ display.cpp -O3 -Wall -g -c -o objs/display.o
 nvcc benchmark.cu -O3 -m64 -c -o objs/benchmark.o
 g++ refRenderer.cpp -O3 -Wall -g -c -o objs/refRenderer.o
 nvcc cudaRenderer.cu -O3 -m64 -c -o objs/cudaRenderer.o
-cudaRenderer.cu(399): warning #177-D: variable "invWidth" was declared but never referenced
-      float invWidth = 1.0f / imageWidth;
-            ^
-
-Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
-
-cudaRenderer.cu(400): warning #177-D: variable "invHeight" was declared but never referenced
-      float invHeight = 1.0f / imageHeight;
-            ^
-
 g++ noise.cpp -O3 -Wall -g -c -o objs/noise.o
 g++ ppm.cpp -O3 -Wall -g -c -o objs/ppm.o
 g++ sceneLoader.cpp -O3 -Wall -g -c -o objs/sceneLoader.o
-g++ -O3 -Wall -g -o render objs/main.o objs/display.o objs/benchmark.o objs/refRenderer.o objs/cudaRenderer.o objs/noise.o objs/ppm.o objs/sceneLoader.o -L/usr/local/cuda/lib64/ -lcudart -lGL -lglut -lcudart
+g++ -O3 -Wall -g -o render objs/main.o objs/display.o objs/benchmark.o objs/refRenderer.o objs/cudaRenderer.o objs/noise.o objs/ppm.o objs/sceneLoader.o -L/usr/local/cuda/lib64/ -lcudart -lGL -lglut -lcudart 
