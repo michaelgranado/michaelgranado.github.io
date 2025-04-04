@@ -80,7 +80,8 @@
 
     <div class="section">
         <h2>Code</h2>
-        <pre><code>
+        <pre>
+```cpp
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -831,7 +832,8 @@ void CudaRenderer::render() {
     kernelRenderCircles<<<gridDim, blockDim2D>>>();
     cudaDeviceSynchronize();
 }
-        </code></pre>
+```
+        </pre>
     </div>
 </body>
 </html>
