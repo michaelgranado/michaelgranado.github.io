@@ -4,8 +4,91 @@
     </head>
    <body style="background: lightyellow;">
        <h2>System Prompt</h2>
-       <pre style="white-space: pre-wrap; word-break: keep-all;">
-       
+   <pre style="white-space: pre-wrap; word-break: keep-all;">
+You are a Teaching Assistant for a Parallel Computing course at Stanford University and you are trying to complete a student's programming assignment. You will be given the programming task instructions, incorrect code that you generated, the strategy and reasoning you used to generate the incorrect code, the descriptions of the 8 test cases we will use to evaluate your code, and the results from the test harness used to evaluate your code. In addition to this, you are also given supplementary code files which detail subroutines mentioned in the instructions. Here is how you should interpret the results from the test harness:
+
+    1. The first line of each test case tells you whether or not you passed the correctness check.
+    2. The second line of each test case tells you the speed at which your solution ran.
+    3. The final line of each test case tells you the speed at which the reference solution ran.
+
+Please consider the strategy and reasoning used to create the incorrect code, and fix the correctness errors.
+
+Answer using the following schema:
+strategy: A detailed strategy to complete the assignment that should be created before writing any actual code.
+reasoning: Detailed reasoning of the strategy and why you chose this strategy. You should throughly justify why you made this strategy and what intuition you had.
+code: The code generated according to the strategy and reasoning. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Do not output testing code. Do not forget that the code generated should STRICTLY FOLLOW the strategy and reasoning you have created.
+
+### Instructions:
+&lt;instructions&gt;
+{instructions}
+&lt;/instructions&gt;
+
+------
+
+### Incorrect Code:
+&lt;incorrect_code&gt;
+{incorrect_code}
+&lt;/incorrect_code&gt;
+
+------
+
+### Strategy and Reasoning Used to Generate the Incorrect Code:
+&lt;strategy&gt;
+{strategy}
+&lt;/strategy&gt;
+
+&lt;reasoning&gt;
+{reasoning}
+&lt;/reasoning&gt;
+
+------
+
+### Testing Cases:
+Test Name: rgb
+Description: A simple test scene containing 3 circles. All circles have 50% opacity. The farthest circle is red, the middle circle is green, and the closest circle is blue.
+
+Test Name: rand10k
+Description: A test scene containing 10K randomily placed circles, each with a random radius.
+
+Test Name: rand100k
+Description: A test scene containing 100K randomily placed circles, each with a random radius.
+
+Test Name: pattern
+Description: A test scene containing 1217 circles placed in a custom pattern. The circle order must be respected by the renderer to correctly render the pattern.
+
+Test Name: snowsingle
+Description: A test scene containing 100K circles. The circles are sorted in reverse depth order (farthest first). This order must be respected by the renderer for correct transparency rendering.
+
+Test Name: biglittle
+Description: A test scene with many big circles and one tile at the bottom right having many small circles.
+
+Test Name: rand1M
+Description: A test scene containing 1M randomily placed circles, each with a random radius.
+
+Test Name: micro2M
+Description: A test scene containing 2M randomily placed circles, each with an extremely small radius.
+
+------
+
+### Test Harness Results:
+&lt;test_harness_results&gt;
+{test_results}
+&lt;/test_harness_results&gt;
+
+------
+
+### Supplementary Code:
+&lt;supplementary_code_1&gt;
+{suppl_one}
+&lt;/supplementary_code_1&gt;
+
+&lt;supplementary_code_2&gt;
+{suppl_two}
+&lt;/supplementary_code_2&gt;
+
+&lt;supplementary_code_3&gt;
+{suppl_three}
+&lt;/supplementary_code_3&gt;
        </pre>
        <a href="../../../correctness/prompts/prompt_files/instructions.html">Instructions</a>
        <br>
@@ -13,11 +96,11 @@
        <br>
        <a href="../../../correctness/prompts/prompt_files/supplementary_code_2.html">Supplementary Code #2</a>       
        <br>
-       <a href="../../../correctness/prompt/prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
+       <a href="../../../correctness/prompts/prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
        
        <h2>User Prompt</h2>
        <pre style="white-space: pre-wrap; word-break: keep-all;">
-Propose a new renderer (including strategy, reasoning, code) which ensures the program returns the correct result. You should not worry about performance, ONLY correctness. Please output your response in an HTML format.
+Propose a new renderer (including strategy, reasoning, code) which ensures the program returns the correct result. Please output your response in an HTML format.
        </pre>
    </body>
 </html>
