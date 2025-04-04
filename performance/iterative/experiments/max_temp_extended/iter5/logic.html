@@ -190,9 +190,9 @@ __global__ void kernelRenderCirclesOptimized() {
         int offset = 4 * (pixelY * width + pixelX);
         *(float4*)(&cuConstRendererParams.imageData[offset]) = pixelColor;
     }
-}&lt;/code&gt;&lt;/pre&gt;
+}
 
-        &lt;pre&gt;&lt;code&gt;void CudaRenderer::render() {
+void CudaRenderer::render() {
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim(
         (image-&gt;width + TILE_SIZE - 1) / TILE_SIZE,
