@@ -1,56 +1,56 @@
 Running scene: rgb...
 [rgb] Correctness failed ... Check ./logs/correctness_rgb.log
-[rgb] Student times:  [1.5742, 1.5852, 1.5808]
-[rgb] Reference times:  [0.2644, 0.2647, 0.2659]
+[rgb] Student times:  [0.3567, 0.3522, 0.3565]
+[rgb] Reference times:  [0.2686, 0.2683, 0.2648]
 
 Running scene: rand10k...
 [rand10k] Correctness failed ... Check ./logs/correctness_rand10k.log
-[rand10k] Student times:  [13.1757, 13.1721, 13.1797]
-[rand10k] Reference times:  [2.7365, 2.7405, 2.7361]
+[rand10k] Student times:  [1.7993, 1.802, 1.795]
+[rand10k] Reference times:  [2.7373, 2.7488, 2.7417]
 
 Running scene: rand100k...
 [rand100k] Correctness failed ... Check ./logs/correctness_rand100k.log
-[rand100k] Student times:  [144.3208, 144.4917, 144.3097]
-[rand100k] Reference times:  [26.0162, 26.0915, 26.0433]
+[rand100k] Student times:  [10.4575, 10.4428, 10.4571]
+[rand100k] Reference times:  [26.0918, 26.148, 26.0491]
 
 Running scene: pattern...
-[pattern] Correctness passed!
-[pattern] Student times:  [0.9986, 1.0035, 1.056]
-[pattern] Reference times:  [0.3565, 0.3585, 0.3546]
+[pattern] Correctness failed ... Check ./logs/correctness_pattern.log
+[pattern] Student times:  [0.3028, 0.3014, 0.3091]
+[pattern] Reference times:  [0.3568, 0.3615, 0.3566]
 
 Running scene: snowsingle...
 [snowsingle] Correctness passed!
-[snowsingle] Student times:  [2.3625, 2.3643, 2.3698]
-[snowsingle] Reference times:  [16.0796, 16.0768, 16.0641]
+[snowsingle] Student times:  [0.8148, 0.8201, 0.816]
+[snowsingle] Reference times:  [16.1313, 16.131, 16.1468]
 
 Running scene: biglittle...
 [biglittle] Correctness failed ... Check ./logs/correctness_biglittle.log
-[biglittle] Student times:  [241.6948, 242.4844, 243.0183]
-[biglittle] Reference times:  [14.8075, 14.8254, 14.9156]
+[biglittle] Student times:  [11.2925, 11.279, 11.2601]
+[biglittle] Reference times:  [14.9737, 14.8283, 14.8601]
 
 Running scene: rand1M...
 [rand1M] Correctness failed ... Check ./logs/correctness_rand1M.log
-[rand1M] Student times:  [80.9109, 80.955, 80.4105]
-[rand1M] Reference times:  [187.7558, 187.2822, 187.5625]
+[rand1M] Student times:  [10.7419, 10.7579, 10.7632]
+[rand1M] Reference times:  [189.3974, 189.282, 187.9346]
 
 Running scene: micro2M...
 [micro2M] Correctness failed ... Check ./logs/correctness_micro2M.log
-[micro2M] Student times:  [17.1304, 17.1229, 17.1246]
-[micro2M] Reference times:  [351.6174, 351.4284, 353.0636]
+[micro2M] Student times:  [11.204, 11.2042, 11.1948]
+[micro2M] Reference times:  [351.3507, 351.8181, 351.2432]
 ------------
 Score table:
 ------------
 --------------------------------------------------------------------------
 | Scene Name      | Ref Time (T_ref) | Your Time (T)   | Score           |
 --------------------------------------------------------------------------
-| rgb             | 0.2644           | (F)             | 0               |
-| rand10k         | 2.7361           | (F)             | 0               |
-| rand100k        | 26.0162          | (F)             | 0               |
-| pattern         | 0.3546           | 0.9986          | 5               |
-| snowsingle      | 16.0641          | 2.3625          | 9               |
-| biglittle       | 14.8075          | (F)             | 0               |
-| rand1M          | 187.2822         | (F)             | 0               |
-| micro2M         | 351.4284         | (F)             | 0               |
+| rgb             | 0.2648           | (F)             | 0               |
+| rand10k         | 2.7373           | (F)             | 0               |
+| rand100k        | 26.0491          | (F)             | 0               |
+| pattern         | 0.3566           | (F)             | 0               |
+| snowsingle      | 16.131           | 0.8148          | 9               |
+| biglittle       | 14.8283          | (F)             | 0               |
+| rand1M          | 187.9346         | (F)             | 0               |
+| micro2M         | 351.2432         | (F)             | 0               |
 --------------------------------------------------------------------------
-|                                    | Total score:    | 14/72           |
+|                                    | Total score:    | 9/72            |
 --------------------------------------------------------------------------

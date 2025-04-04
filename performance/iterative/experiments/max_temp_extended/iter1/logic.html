@@ -1,80 +1,37 @@
 <body style="background: lightyellow;">
-<h1>CUDA Circle Renderer Optimization</h1>
+<h1>Optimized CUDA Circle Renderer</h1>
 
 <h2>Strategy</h2>
-<p>
-After analyzing the provided code and test results, I've identified several key bottlenecks in the current implementation:
-</p>
+<p>The key issue with the current implementation is that it processes circles sequentially for each pixel, which is highly inefficient for scenes with many circles. My strategy to optimize this renderer includes:</p>
 
 <ol>
-  <li>
-    <strong>Processing Approach:</strong> The current approach processes all circles for every pixel, which is highly inefficient. Most pixels are only affected by a small subset of circles.
-  </li>
-  <li>
-    <strong>Memory Access Patterns:</strong> The renderer is likely experiencing poor memory access patterns, causing cache misses and memory contention.
-  </li>
-  <li>
-    <strong>Work Distribution:</strong> The work distribution across threads is suboptimal, with each thread (pixel) potentially doing very different amounts of computation.
-  </li>
-</ol>
-
-<p>
-My strategy will involve:
-</p>
-
-<ol>
-  <li>
-    <strong>Circle-Centric Approach:</strong> Instead of having each thread process all circles for a single pixel, I'll assign threads to circles and have them compute their contribution to all affected pixels.
-  </li>
-  <li>
-    <strong>Spatial Binning:</strong> I'll implement a grid structure to efficiently identify which pixels each circle affects.
-  </li>
-  <li>
-    <strong>Atomic Operations:</strong> To ensure correctness with the circle-centric approach, I'll use atomic operations for properly blending colors in the output image.
-  </li>
-  <li>
-    <strong>Circle Processing Order:</strong> To maintain the ordering requirement, I'll process circles sequentially, but parallelize the pixel updates for each circle.
-  </li>
+  <li><strong>Divide-and-conquer with spatial binning</strong>: Group circles into screen-space bins to reduce the number of circles each pixel needs to check.</li>
+  <li><strong>Parallel processing</strong>: Assign each bin processing to a separate thread block to maximize GPU utilization.</li>
+  <li><strong>Local accumulation</strong>: Continue to use local color accumulators before writing final results to global memory.</li>
+  <li><strong>Preserve circle ordering</strong>: Ensure circles within each bin maintain their original order to satisfy the transparency requirements.</li>
+  <li><strong>Better memory access patterns</strong>: Optimize memory access patterns to reduce global memory traffic.</li>
 </ol>
 
 <h2>Reasoning</h2>
-<p>
-The current implementation's poor performance stems from its inefficient approach to the rendering problem. Here's the detailed reasoning behind my strategy:
-</p>
+<p>After analyzing the current implementation, I identified several inefficiencies:</p>
+
+<ul>
+  <li><strong>Too many circle checks</strong>: Each pixel checks every circle in the scene, even though most circles don't contribute to most pixels.</li>
+  <li><strong>Redundant bounding box tests</strong>: Adjacent pixels perform the same bounding box tests for the same circles.</li>
+  <li><strong>Limited parallelism</strong>: The current approach doesn't exploit the parallelism potential of modern GPUs effectively.</li>
+</ul>
+
+<p>The spatial binning approach addresses these issues by:</p>
 
 <ol>
-  <li>
-    <strong>Pixel-Centric vs Circle-Centric:</strong>
-    <ul>
-      <li>The original code uses a pixel-centric approach where each thread processes a single pixel and loops through all circles. For scenes with many circles (like 1M or 2M), this leads to excessive computation.</li>
-      <li>A circle-centric approach is more efficient because each circle typically affects only a small region of pixels. By focusing on circles, we can limit our computation to just the affected pixels.</li>
-    </ul>
-  </li>
-  
-  <li>
-    <strong>Addressing Ordering Requirements:</strong>
-    <ul>
-      <li>The key insight is that while we need to respect the ordering of circle contributions to the same pixel, circles that don't overlap can be processed in parallel.</li>
-      <li>My approach will process circles sequentially to maintain order but parallelize the pixel updates for each circle.</li>
-    </ul>
-  </li>
-  
-  <li>
-    <strong>Optimizing Memory Access:</strong>
-    <ul>
-      <li>By implementing a circle-centric approach, memory access patterns become more predictable and localized, improving cache efficiency.</li>
-      <li>Using atomic operations for blending ensures correctness when multiple threads update the same pixel.</li>
-    </ul>
-  </li>
-  
-  <li>
-    <strong>Load Balancing:</strong>
-    <ul>
-      <li>Different circles may affect different numbers of pixels. To balance the workload, we'll process one circle at a time with many threads working on it.</li>
-      <li>This approach will lead to better GPU utilization, especially for scenes with varying circle sizes.</li>
-    </ul>
-  </li>
+  <li><strong>Reducing work per pixel</strong>: Each pixel only needs to check circles in its corresponding bin.</li>
+  <li><strong>Improving locality</strong>: Circles in the same area of the screen are processed together, improving cache efficiency.</li>
+  <li><strong>Maintaining correctness</strong>: By preserving the original order of circles within each bin, we maintain the correct transparency rendering.</li>
 </ol>
+
+<p>This approach is commonly used in rendering and collision detection systems because it reduces the computational complexity from O(pixels × circles) to approximately O(pixels × average_circles_per_bin), which can be a significant improvement when many circles are distributed across the screen.</p>
+
+<p>The implementation requires additional memory for the bin data structures, but the performance gains should far outweigh this cost. The key challenge is ensuring that the bin construction is efficient and that circle ordering is preserved.</p>
 
 <h2>Code</h2>
 
@@ -99,8 +56,21 @@ The current implementation's poor performance stems from its inefficient approac
 // Putting all the cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
 
-struct GlobalConstants {
+// Define grid dimensions for spatial binning
+#define GRID_DIM_X 32
+#define GRID_DIM_Y 32
+#define MAX_CIRCLES_PER_BIN 1024 // A safety upper bound
+#define CUDA_CHECK(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
 
+struct GlobalConstants {
     SceneName sceneName;
 
     int numCircles;
@@ -112,6 +82,10 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
+
+    // New fields for spatial binning
+    int* circleBinCounts;    // Number of circles in each bin
+    int* circleBinIndices;   // Indices of circles in each bin
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -142,7 +116,6 @@ __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 // Clear the image, setting the image to the white-gray gradation that
 // is used in the snowflake image
 __global__ void kernelClearImageSnowflake() {
-
     int imageX = blockIdx.x * blockDim.x + threadIdx.x;
     int imageY = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -166,7 +139,6 @@ __global__ void kernelClearImageSnowflake() {
 //
 // Clear the image, setting all pixels to the specified color rgba
 __global__ void kernelClearImage(float r, float g, float b, float a) {
-
     int imageX = blockIdx.x * blockDim.x + threadIdx.x;
     int imageY = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -395,16 +367,16 @@ __global__ void kernelAdvanceSnowflake() {
 // shadePixel -- (CUDA device code)
 //
 // given a pixel and a circle, determines the contribution to the
-// pixel from the circle.  Update of the image is done using
-// atomicAdd (floating-point version)
+// pixel from the circle.  Update of the image is done in this
+// function.  Called by kernelRenderCircles()
 __device__ __inline__ void
-shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
+shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* local) {
 
     float diffX = p.x - pixelCenter.x;
     float diffY = p.y - pixelCenter.y;
     float pixelDist = diffX * diffX + diffY * diffY;
 
-    float rad = cuConstRendererParams.radius[circleIndex];
+    float rad = cuConstRendererParams.radius[circleIndex];;
     float maxDist = rad * rad;
 
     // circle does not contribute to the image
@@ -421,7 +393,7 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
     // setting up the lane masks etc to implement the conditional.  It
     // would be wise to perform this logic outside of the loop next in
     // kernelRenderCircles.  (If feeling good about yourself, you
-    // could use some specialized template magic).
+    // could use some specialized template magic)
     if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
 
         const float kCircleMaxAlpha = .5f;
@@ -443,91 +415,108 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
 
     float oneMinusAlpha = 1.f - alpha;
 
-    // atomically add to the output image
-    // Note: This is the key change for the circle-centric approach
-    // Using atomicAdd for correct blending while maintaining order
-    atomicAdd(&(imagePtr-&gt;x), alpha * rgb.x - alpha * imagePtr-&gt;x);
-    atomicAdd(&(imagePtr-&gt;y), alpha * rgb.y - alpha * imagePtr-&gt;y);
-    atomicAdd(&(imagePtr-&gt;z), alpha * rgb.z - alpha * imagePtr-&gt;z);
-    atomicAdd(&(imagePtr-&gt;w), alpha - alpha * imagePtr-&gt;w);
+    // now we're doing the blending directly into our local value
+    local-&gt;x = alpha * rgb.x + oneMinusAlpha * local-&gt;x;
+    local-&gt;y = alpha * rgb.y + oneMinusAlpha * local-&gt;y;
+    local-&gt;z = alpha * rgb.z + oneMinusAlpha * local-&gt;z;
+    local-&gt;w = alpha + local-&gt;w;
 }
 
-// kernelRenderCircles -- (CUDA device code)
-//
-// This new implementation renders each circle by having blocks of threads
-// work on each circle, and having threads within a block work on different pixels.
-__global__ void kernelRenderCircles() {
-    // Circle index that this block is processing
-    int circleIdx = blockIdx.x;
+// Assign circles to bins for spatial organization
+__global__ void kernelBinCircles() {
+    int circleIdx = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (circleIdx &gt;= cuConstRendererParams.numCircles)
         return;
     
-    // Get the thread's position within the block
-    // We'll use a 2D thread layout within each block to efficiently cover 
-    // the bounding box of pixels affected by this circle
-    int threadX = threadIdx.x;
-    int threadY = threadIdx.y;
-    
-    int width = cuConstRendererParams.imageWidth;
-    int height = cuConstRendererParams.imageHeight;
-    float invWidth = 1.f / width;
-    float invHeight = 1.f / height;
-    
-    // Get circle position and radius
     int index3 = 3 * circleIdx;
+    
+    // Read position and radius
     float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
     float rad = cuConstRendererParams.radius[circleIdx];
     
-    // Compute circle's bounding box in screen space
-    float minX = (p.x - rad);
-    float maxX = (p.x + rad);
-    float minY = (p.y - rad);
-    float maxY = (p.y + rad);
-    
-    // Convert to pixel coordinates
-    int minPixelX = max(0, (int)floor(minX * width));
-    int maxPixelX = min(width - 1, (int)ceil(maxX * width));
-    int minPixelY = max(0, (int)floor(minY * height));
-    int maxPixelY = min(height - 1, (int)ceil(maxY * height));
-    
-    // Calculate the dimensions of the bounding box
-    int boxWidth = maxPixelX - minPixelX + 1;
-    int boxHeight = maxPixelY - minPixelY + 1;
-    
-    // Calculate the stride for mapping threads to pixels in the box
-    int threadCount = blockDim.x * blockDim.y;
-    int pixelCount = boxWidth * boxHeight;
-    
-    // Each thread will handle multiple pixels if necessary
-    for (int i = (threadY * blockDim.x + threadX); i &lt; pixelCount; i += threadCount) {
-        // Convert back to 2D coordinates within the bounding box
-        int relativeX = i % boxWidth;
-        int relativeY = i / boxWidth;
-        
-        // Calculate actual pixel coordinates
-        int pixelX = minPixelX + relativeX;
-        int pixelY = minPixelY + relativeY;
-        
-        // Skip if outside image bounds (should be redundant with our min/max calculations)
-        if (pixelX &lt; 0 || pixelX &gt;= width || pixelY &lt; 0 || pixelY &gt;= height)
-            continue;
-        
-        // Calculate normalized pixel center position
-        float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
-                                             invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
-        
-        // Offset to the pixel in the image
-        int offset = 4 * (pixelY * width + pixelX);
-        float4* pixelColorPtr = (float4*)(&cuConstRendererParams.imageData[offset]);
-        
-        // Check if the pixel is affected by this circle and shade it if so
-        shadePixel(circleIdx, pixelCenterNorm, p, pixelColorPtr);
+    // Calculate the bins this circle could be in
+    int minBinX = max(0, static_cast&lt;int&gt;((p.x - rad) * GRID_DIM_X));
+    int maxBinX = min(GRID_DIM_X - 1, static_cast&lt;int&gt;((p.x + rad) * GRID_DIM_X));
+    int minBinY = max(0, static_cast&lt;int&gt;((p.y - rad) * GRID_DIM_Y));
+    int maxBinY = min(GRID_DIM_Y - 1, static_cast&lt;int&gt;((p.y + rad) * GRID_DIM_Y));
+
+    // Add this circle to all relevant bins
+    for (int binY = minBinY; binY &lt;= maxBinY; binY++) {
+        for (int binX = minBinX; binX &lt;= maxBinX; binX++) {
+            int binIdx = binY * GRID_DIM_X + binX;
+            
+            // Atomically increment the count for this bin and get the previous value
+            int insertIdx = atomicAdd(&cuConstRendererParams.circleBinCounts[binIdx], 1);
+            
+            // Check if there's space in the bin (safety check)
+            if (insertIdx &lt; MAX_CIRCLES_PER_BIN) {
+                // Store the circle index at the appropriate location
+                cuConstRendererParams.circleBinIndices[binIdx * MAX_CIRCLES_PER_BIN + insertIdx] = circleIdx;
+            }
+        }
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////
+// Render using the spatial binning approach
+__global__ void kernelRenderCirclesBinned() {
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
 
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
+
+    if (imageX &gt;= width || imageY &gt;= height)
+        return;
+    
+    // Calculate which bin this pixel belongs to
+    int binX = min(static_cast&lt;int&gt;(static_cast&lt;float&gt;(imageX) / width * GRID_DIM_X), GRID_DIM_X - 1);
+    int binY = min(static_cast&lt;int&gt;(static_cast&lt;float&gt;(imageY) / height * GRID_DIM_Y), GRID_DIM_Y - 1);
+    int binIdx = binY * GRID_DIM_X + binX;
+    
+    // Create a local accumulator for this pixel
+    float4 pixelColor = make_float4(0.f, 0.f, 0.f, 0.f);
+    
+    // Get current image color from global memory
+    int offset = 4 * (imageY * width + imageX);
+    pixelColor = *(float4*)(&cuConstRendererParams.imageData[offset]);
+    
+    // Normalized pixel center position
+    float invWidth = 1.f / width;
+    float invHeight = 1.f / height;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(imageX) + 0.5f),
+                                         invHeight * (static_cast&lt;float&gt;(imageY) + 0.5f));
+    
+    // Get the number of circles in this bin
+    int binCircleCount = cuConstRendererParams.circleBinCounts[binIdx];
+    
+    // Process all circles in this bin, in the original order
+    for (int i = 0; i &lt; binCircleCount && i &lt; MAX_CIRCLES_PER_BIN; i++) {
+        int circleIdx = cuConstRendererParams.circleBinIndices[binIdx * MAX_CIRCLES_PER_BIN + i];
+        int index3 = 3 * circleIdx;
+        
+        // Read position and radius
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIdx];
+        
+        // Skip circle if it doesn't affect this pixel
+        if (!circleInBoxConservative(p.x, p.y, rad, 
+                                   pixelCenterNorm.x - invWidth/2, 
+                                   pixelCenterNorm.x + invWidth/2,
+                                   pixelCenterNorm.y + invHeight/2, 
+                                   pixelCenterNorm.y - invHeight/2))
+            continue;
+        
+        // Circle might affect this pixel, check if the pixel center is inside the circle
+        // and compute shading if it is
+        shadePixel(circleIdx, pixelCenterNorm, p, &pixelColor);
+    }
+    
+    // Write the final color for this pixel to global memory once
+    *(float4*)(&cuConstRendererParams.imageData[offset]) = pixelColor;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////
 
 CudaRenderer::CudaRenderer() {
     image = NULL;
@@ -543,10 +532,13 @@ CudaRenderer::CudaRenderer() {
     cudaDeviceColor = NULL;
     cudaDeviceRadius = NULL;
     cudaDeviceImageData = NULL;
+    
+    // Initialize new fields for spatial binning
+    cudaDeviceCircleBinCounts = NULL;
+    cudaDeviceCircleBinIndices = NULL;
 }
 
 CudaRenderer::~CudaRenderer() {
-
     if (image) {
         delete image;
     }
@@ -564,21 +556,21 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceColor);
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
+        cudaFree(cudaDeviceCircleBinCounts);
+        cudaFree(cudaDeviceCircleBinIndices);
     }
 }
 
 const Image*
 CudaRenderer::getImage() {
-
     // need to copy contents of the rendered image from device memory
     // before we expose the Image object to the caller
-
     printf("Copying image data from device\n");
 
-    cudaMemcpy(image-&gt;data,
+    CUDA_CHECK(cudaMemcpy(image-&gt;data,
                cudaDeviceImageData,
                sizeof(float) * 4 * image-&gt;width * image-&gt;height,
-               cudaMemcpyDeviceToHost);
+               cudaMemcpyDeviceToHost));
 
     return image;
 }
@@ -591,7 +583,6 @@ CudaRenderer::loadScene(SceneName scene) {
 
 void
 CudaRenderer::setup() {
-
     int deviceCount = 0;
     std::string name;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
@@ -619,16 +610,21 @@ CudaRenderer::setup() {
     // See the CUDA Programmer's Guide for descriptions of
     // cudaMalloc and cudaMemcpy
 
-    cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numCircles);
-    cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numCircles);
-    cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numCircles);
-    cudaMalloc(&cudaDeviceRadius, sizeof(float) * numCircles);
-    cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image-&gt;width * image-&gt;height);
+    CUDA_CHECK(cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numCircles));
+    CUDA_CHECK(cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numCircles));
+    CUDA_CHECK(cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numCircles));
+    CUDA_CHECK(cudaMalloc(&cudaDeviceRadius, sizeof(float) * numCircles));
+    CUDA_CHECK(cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image-&gt;width * image-&gt;height));
+    
+    // Allocate memory for spatial binning
+    int binCount = GRID_DIM_X * GRID_DIM_Y;
+    CUDA_CHECK(cudaMalloc(&cudaDeviceCircleBinCounts, sizeof(int) * binCount));
+    CUDA_CHECK(cudaMalloc(&cudaDeviceCircleBinIndices, sizeof(int) * binCount * MAX_CIRCLES_PER_BIN));
 
-    cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
-    cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numCircles, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numCircles, cudaMemcpyHostToDevice));
 
     // Initialize parameters in constant memory.  We didn't talk about
     // constant memory in class, but the use of read-only constant
@@ -648,8 +644,10 @@ CudaRenderer::setup() {
     params.color = cudaDeviceColor;
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
+    params.circleBinCounts = cudaDeviceCircleBinCounts;
+    params.circleBinIndices = cudaDeviceCircleBinIndices;
 
-    cudaMemcpyToSymbol(cuConstRendererParams, &amp;params, sizeof(GlobalConstants));
+    CUDA_CHECK(cudaMemcpyToSymbol(cuConstRendererParams, &amp;params, sizeof(GlobalConstants)));
 
     // also need to copy over the noise lookup tables, so we can
     // implement noise on the GPU
@@ -657,13 +655,12 @@ CudaRenderer::setup() {
     int* permY;
     float* value1D;
     getNoiseTables(&permX, &permY, &value1D);
-    cudaMemcpyToSymbol(cuConstNoiseXPermutationTable, permX, sizeof(int) * 256);
-    cudaMemcpyToSymbol(cuConstNoiseYPermutationTable, permY, sizeof(int) * 256);
-    cudaMemcpyToSymbol(cuConstNoise1DValueTable, value1D, sizeof(float) * 256);
+    CUDA_CHECK(cudaMemcpyToSymbol(cuConstNoiseXPermutationTable, permX, sizeof(int) * 256));
+    CUDA_CHECK(cudaMemcpyToSymbol(cuConstNoiseYPermutationTable, permY, sizeof(int) * 256));
+    CUDA_CHECK(cudaMemcpyToSymbol(cuConstNoise1DValueTable, value1D, sizeof(float) * 256));
 
     // last, copy over the color table that's used by the shading
     // function for circles in the snowflake demo
-
     float lookupTable[COLOR_MAP_SIZE][3] = {
         {1.f, 1.f, 1.f},
         {1.f, 1.f, 1.f},
@@ -672,7 +669,7 @@ CudaRenderer::setup() {
         {.8f, 0.8f, 1.f},
     };
 
-    cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE);
+    CUDA_CHECK(cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE));
 }
 
 // allocOutputImage --
@@ -681,7 +678,6 @@ CudaRenderer::setup() {
 // image first to avoid memory leak.
 void
 CudaRenderer::allocOutputImage(int width, int height) {
-
     if (image)
         delete image;
     image = new Image(width, height);
@@ -693,7 +689,6 @@ CudaRenderer::allocOutputImage(int width, int height) {
 // the clear depends on the scene being rendered.
 void
 CudaRenderer::clearImage() {
-
     // 256 threads per block is a healthy number
     dim3 blockDim(16, 16, 1);
     dim3 gridDim(
@@ -705,7 +700,7 @@ CudaRenderer::clearImage() {
     } else {
         kernelClearImage&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(1.f, 1.f, 1.f, 1.f);
     }
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 // advanceAnimation --
@@ -728,58 +723,92 @@ CudaRenderer::advanceAnimation() {
     } else if (sceneName == FIREWORKS) { 
         kernelAdvanceFireWorks&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(); 
     }
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void
 CudaRenderer::render() {
-    // For the circle-centric approach:
-    // 1. Each block processes one circle
-    // 2. Threads within a block process pixels affected by that circle
+    // Zero out the bin counts and indices before binning
+    int binCount = GRID_DIM_X * GRID_DIM_Y;
+    CUDA_CHECK(cudaMemset(cudaDeviceCircleBinCounts, 0, sizeof(int) * binCount));
     
-    dim3 blockDim(16, 16); // 256 threads per block to process a circle's pixels
-    dim3 gridDim(numCircles); // One block per circle
+    // Launch kernel to bin circles
+    dim3 circleBinBlockDim(256, 1);
+    dim3 circleBinGridDim((numCircles + circleBinBlockDim.x - 1) / circleBinBlockDim.x);
+    kernelBinCircles&lt;&lt;&lt;circleBinGridDim, circleBinBlockDim&gt;&gt;&gt;();
+    CUDA_CHECK(cudaDeviceSynchronize());
     
-    kernelRenderCircles&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
-    cudaDeviceSynchronize();
+    // Use a 2D grid for parallelizing over pixels
+    dim3 blockDim(16, 16); // 256 threads per block
+    dim3 gridDim(
+        (image-&gt;width + blockDim.x - 1) / blockDim.x,
+        (image-&gt;height + blockDim.y - 1) / blockDim.y);
+
+    kernelRenderCirclesBinned&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 </pre>
 
-<h2>Performance Analysis</h2>
-<p>
-The optimized renderer should show significant improvements over the original implementation, especially on test cases with many circles:
-</p>
+<pre>
+// Add to cudaRenderer.h
+#ifndef __CUDA_RENDERER_H__
+#define __CUDA_RENDERER_H__
 
-<ol>
-  <li>
-    <strong>Key Optimizations:</strong>
-    <ul>
-      <li>Circle-centric processing drastically reduces redundant computation by only processing pixels affected by each circle.</li>
-      <li>Better work distribution with one block per circle and threads collaboratively processing pixels within the circle's bounding box.</li>
-      <li>Atomic operations ensure correct blending while allowing parallel updates to shared pixels.</li>
-      <li>Bounding box calculation restricts computation to only pixels potentially affected by a circle.</li>
-    </ul>
-  </li>
-  
-  <li>
-    <strong>Expected Improvements:</strong>
-    <ul>
-      <li>Small scenes (rgb): The overhead of the atomic operations might make this slightly slower.</li>
-      <li>Medium scenes (rand10k, rand100k, pattern): Should show significant speedups as inefficient circle iteration is eliminated.</li>
-      <li>Large scenes (rand1M, micro2M): Should show dramatic performance improvements as the majority of unnecessary pixel-circle tests are avoided.</li>
-    </ul>
-  </li>
-</ol>
+#ifndef uint
+#define uint unsigned int
+#endif
 
-<p>
-The implementation ensures correctness by:
-</p>
-<ol>
-  <li>Processing circles in the order they are given (respecting the ordering requirement)</li>
-  <li>Using atomic operations to ensure proper blending when multiple threads update the same pixel</li>
-  <li>Carefully handling circle bounding box calculations to ensure all affected pixels are processed</li>
-</ol>
+#include "circleRenderer.h"
 
-<p>
-This approach should significantly outperform the original implementation on all test cases while maintaining correct rendering results.
-</p></body>
+class CudaRenderer : public CircleRenderer {
+
+private:
+
+    Image* image;
+    SceneName sceneName;
+
+    int numCircles;
+    float* position;
+    float* velocity;
+    float* color;
+    float* radius;
+
+    float* cudaDevicePosition;
+    float* cudaDeviceVelocity;
+    float* cudaDeviceColor;
+    float* cudaDeviceRadius;
+    float* cudaDeviceImageData;
+    
+    // New fields for spatial binning
+    int* cudaDeviceCircleBinCounts;
+    int* cudaDeviceCircleBinIndices;
+
+public:
+
+    CudaRenderer();
+    virtual ~CudaRenderer();
+
+    const Image* getImage();
+
+    void setup();
+
+    void loadScene(SceneName name);
+
+    void allocOutputImage(int width, int height);
+
+    void clearImage();
+
+    void advanceAnimation();
+
+    void render();
+
+    void shadePixel(
+        int circleIndex,
+        float pixelCenterX, float pixelCenterY,
+        float px, float py, float pz,
+        float* pixelData);
+};
+
+#endif
+</pre>
+</body>
