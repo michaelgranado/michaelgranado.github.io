@@ -672,58 +672,65 @@ __global__ void kernelRenderCirclesTiled() {
     }
 }
 
-#define BATCH_SIZE 512
+#define MAX_BATCH_SIZE 4096
 
-// Adaptively choose batch size based on number of circles
+// Helper to dynamically select batch size based on scene complexity
 __device__ int getBatchSize(int numCircles) {
-    if (numCircles &gt;= 1000000) return 1024;
-    if (numCircles &gt;= 100000) return 512;
-    return 256;
+    if (numCircles &gt; 1000000) return 4096;     // For extremely large scenes
+    if (numCircles &gt; 100000) return 2048;      // For very large scenes
+    if (numCircles &gt; 10000) return 1024;       // For large scenes
+    return 512;                                // For smaller scenes
 }
 
 __global__ void kernelRenderCirclesOptimized() {
     // Calculate pixel coordinates for this thread
     int pixelX = blockIdx.x * TILE_SIZE + threadIdx.x;
     int pixelY = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int linearThreadIdx = threadIdx.y * TILE_SIZE + threadIdx.x;
+    int threadsPerBlock = TILE_SIZE * TILE_SIZE;
 
     int width = cuConstRendererParams.imageWidth;
     int height = cuConstRendererParams.imageHeight;
 
     // Early exit if pixel is out of bounds
-    if (pixelX &gt;= width || pixelY &gt;= height)
-        return;
+    bool validPixel = (pixelX &lt; width && pixelY &lt; height);
 
-    // Calculate pixel center in normalized coordinates
+    // Initialize pixel data only if valid (reduces register pressure for invalid pixels)
+    float4 pixelColor;
+    int offset;
+    float2 pixelCenterNorm;
+
+    if (validPixel) {
+        // Load current pixel color
+        offset = 4 * (pixelY * width + pixelX);
+        pixelColor = *(float4*)(&cuConstRendererParams.imageData[offset]);
+
+        // Compute normalized pixel coordinates (only once)
+        float invWidth = 1.f / width;
+        float invHeight = 1.f / height;
+        pixelCenterNorm = make_float2(
+            invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
+            invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f)
+        );
+    }
+
+    // Calculate tile bounds for circle culling (once per tile)
     float invWidth = 1.f / width;
     float invHeight = 1.f / height;
-    float2 pixelCenterNorm = make_float2(
-        invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
-        invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f)
-    );
-
-    // Load current pixel color into a register for accumulation
-    int offset = 4 * (pixelY * width + pixelX);
-    float4 pixelColor = *(float4*)(&cuConstRendererParams.imageData[offset]);
-
-    // Calculate tile bounds for circle culling (only once per thread)
     float boxL = invWidth * (blockIdx.x * TILE_SIZE);
     float boxR = invWidth * (min((blockIdx.x + 1) * TILE_SIZE, width));
     float boxT = invHeight * (min((blockIdx.y + 1) * TILE_SIZE, height));
     float boxB = invHeight * (blockIdx.y * TILE_SIZE);
 
-    // Get total number of circles and determine batch size
+    // Determine batch size based on scene complexity
     int numCircles = cuConstRendererParams.numCircles;
     int batchSize = getBatchSize(numCircles);
-
-    // Thread index for collaborative loading
-    int linearThreadIdx = threadIdx.y * TILE_SIZE + threadIdx.x;
-    int threadsPerBlock = TILE_SIZE * TILE_SIZE;
 
     // Shared memory declarations - using extern to adapt to different batch sizes
     extern __shared__ char sharedMem[];
     float3* positions = (float3*)sharedMem;
-    float* radii = (float*)(positions + batchSize);
-    bool* intersects = (bool*)(radii + batchSize);
+    float* radiusSquared = (float*)(positions + batchSize);  // Store r² directly
+    bool* intersects = (bool*)(radiusSquared + batchSize);
     bool* anyIntersection = (bool*)(intersects + batchSize);
 
     // Process all circles in batches
@@ -737,7 +744,7 @@ __global__ void kernelRenderCirclesOptimized() {
         }
         __syncthreads();
 
-        // Collaborative loading of circle data
+        // Collaborative loading of circle data and intersection testing
         for (int i = linearThreadIdx; i &lt; currentBatchSize; i += threadsPerBlock) {
             int circleIdx = batchStart + i;
             int index3 = 3 * circleIdx;
@@ -746,13 +753,13 @@ __global__ void kernelRenderCirclesOptimized() {
             float rad = cuConstRendererParams.radius[circleIdx];
 
             positions[i] = p;
-            radii[i] = rad;
+            radiusSquared[i] = rad * rad;  // Pre-compute r² to avoid multiplication later
 
             // Check if circle intersects with this tile
             bool doesIntersect = circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB);
             intersects[i] = doesIntersect;
 
-            // Update the flag if any circle intersects
+            // Update tile intersection flag if any circle intersects
             if (doesIntersect) {
                 *anyIntersection = true;
             }
@@ -760,28 +767,30 @@ __global__ void kernelRenderCirclesOptimized() {
 
         __syncthreads();
 
-        // Skip this batch if no circle intersects with the tile
+        // Skip this entire batch if no circles intersect with the tile
         if (!(*anyIntersection)) {
             continue;
         }
 
-        // Process only the circles that intersect with this tile
-        for (int i = 0; i &lt; currentBatchSize; i++) {
-            if (!intersects[i])
-                continue;
+        // Process only valid pixels and only circles that intersect with this tile
+        if (validPixel) {
+            for (int i = 0; i &lt; currentBatchSize; i++) {
+                // Skip non-intersecting circles quickly
+                if (!intersects[i])
+                    continue;
 
-            float3 p = positions[i];
-            float rad = radii[i];
+                float3 p = positions[i];
+                float maxDist = radiusSquared[i];
 
-            // Check if this pixel is within the circle
-            float diffX = p.x - pixelCenterNorm.x;
-            float diffY = p.y - pixelCenterNorm.y;
-            float pixelDist = diffX * diffX + diffY * diffY;
-            float maxDist = rad * rad;
+                // Check if pixel is inside circle
+                float diffX = p.x - pixelCenterNorm.x;
+                float diffY = p.y - pixelCenterNorm.y;
+                float pixelDist = diffX * diffX + diffY * diffY;
 
-            if (pixelDist &lt;= maxDist) {
-                // Apply shading for this circle to our local accumulator
-                shadePixel(batchStart + i, pixelCenterNorm, p, &pixelColor);
+                if (pixelDist &lt;= maxDist) {
+                    // Apply shading for this circle
+                    shadePixel(batchStart + i, pixelCenterNorm, p, &pixelColor);
+                }
             }
         }
 
@@ -789,28 +798,33 @@ __global__ void kernelRenderCirclesOptimized() {
     }
 
     // Write the final accumulated color back to global memory (only once)
-    *(float4*)(&cuConstRendererParams.imageData[offset]) = pixelColor;
+    if (validPixel) {
+        *(float4*)(&cuConstRendererParams.imageData[offset]) = pixelColor;
+    }
 }
 
 void CudaRenderer::render() {
-    // Set up block and grid dimensions for the kernel
+    // Set up block and grid dimensions
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim(
         (image-&gt;width + TILE_SIZE - 1) / TILE_SIZE,
         (image-&gt;height + TILE_SIZE - 1) / TILE_SIZE
     );
 
-    // Calculate required shared memory based on number of circles
-    int batchSize = 256;
-    if (numCircles &gt;= 100000) batchSize = 512;
-    if (numCircles &gt;= 1000000) batchSize = 1024;
+    // Determine appropriate batch size based on scene complexity
+    int batchSize = 512;
+    if (numCircles &gt;= 10000) batchSize = 1024;
+    if (numCircles &gt;= 100000) batchSize = 2048;
+    if (numCircles &gt;= 1000000) batchSize = 4096;
 
+    // Calculate required shared memory size
     size_t sharedMemSize = batchSize * (sizeof(float3) + sizeof(float) + sizeof(bool)) + sizeof(bool);
 
     // Launch kernel with dynamic shared memory allocation
     kernelRenderCirclesOptimized&lt;&lt;&lt;gridDim, blockDim, sharedMemSize&gt;&gt;&gt;();
     cudaDeviceSynchronize();
 }
+
        </pre>
     </body>
 </html>
