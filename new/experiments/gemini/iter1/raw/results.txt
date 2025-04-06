@@ -1,0 +1,56 @@
+Running scene: rgb...
+[rgb] Correctness passed!
+[rgb] Student times:  [0.263, 0.2641, 0.2636]
+[rgb] Reference times:  [0.2707, 0.2643, 0.2646]
+
+Running scene: rand10k...
+[rand10k] Correctness passed!
+[rand10k] Student times:  [40.1334, 39.8906, 39.9294]
+[rand10k] Reference times:  [2.7516, 2.7573, 2.7517]
+
+Running scene: rand100k...
+[rand100k] Correctness passed!
+[rand100k] Student times:  [459.8109, 460.8288, 460.0909]
+[rand100k] Reference times:  [26.2771, 26.1499, 26.2922]
+
+Running scene: pattern...
+[pattern] Correctness passed!
+[pattern] Student times:  [4.4781, 4.4666, 4.492]
+[pattern] Reference times:  [0.3596, 0.3622, 0.3573]
+
+Running scene: snowsingle...
+[snowsingle] Correctness passed!
+[snowsingle] Student times:  [418.5811, 418.885, 418.9677]
+[snowsingle] Reference times:  [16.2161, 16.1454, 16.1873]
+
+Running scene: biglittle...
+[biglittle] Correctness passed!
+[biglittle] Student times:  [45.4932, 45.4942, 45.6065]
+[biglittle] Reference times:  [15.0167, 15.1048, 15.0716]
+
+Running scene: rand1M...
+[rand1M] Correctness passed!
+[rand1M] Student times:  [4873.6388, 4885.3258, 4904.11]
+[rand1M] Reference times:  [189.2382, 189.1665, 189.0688]
+
+Running scene: micro2M...
+[micro2M] Correctness passed!
+[micro2M] Student times:  [9773.5959, 9792.8165, 9805.4961]
+[micro2M] Reference times:  [355.7915, 355.7314, 355.712]
+------------
+Score table:
+------------
+--------------------------------------------------------------------------
+| Scene Name      | Ref Time (T_ref) | Your Time (T)   | Score           |
+--------------------------------------------------------------------------
+| rgb             | 0.2643           | 0.263           | 9               |
+| rand10k         | 2.7516           | 39.8906         | 2               |
+| rand100k        | 26.1499          | 459.8109        | 2               |
+| pattern         | 0.3573           | 4.4666          | 2               |
+| snowsingle      | 16.1454          | 418.5811        | 2               |
+| biglittle       | 15.0167          | 45.4932         | 5               |
+| rand1M          | 189.0688         | 4873.6388       | 2               |
+| micro2M         | 355.712          | 9773.5959       | 2               |
+--------------------------------------------------------------------------
+|                                    | Total score:    | 26/72           |
+--------------------------------------------------------------------------
