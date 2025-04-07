@@ -1,17 +1,3 @@
-```html
-<!DOCTYPE html>
-<html>
-<head>
-<title>CUDA Renderer Optimization Proposal</title>
-<style>
-body { font-family: sans-serif; }
-code { background-color: #f4f4f4; border: 1px solid #ddd; display: block; padding: 10px; white-space: pre-wrap; }
-h3 { color: #003366; }
-strong { color: #003366; }
-</style>
-</head>
-<body>
-
 <h3>problem description:</h3>
 <p>The current implementation, <code>kernelRenderCirclesTiled</code>, while correct, suffers from performance issues due to redundant global memory accesses and lack of data reuse within a thread block. Each thread, responsible for a single pixel, iterates through all circles (or all circles overlapping the block's tile). In the inner loop of this iteration, it reads the position and radius of each candidate circle directly from global memory (or constant memory). Since threads within a block often process pixels affected by the same set of circles (especially those within the same tile), the same circle data is fetched from global memory multiple times by different threads in the block, leading to high global memory bandwidth consumption and limiting performance, particularly for scenes with many circles.</p>
 
@@ -54,7 +40,8 @@ strong { color: #003366; }
 </ol>
 
 <h3>code:</h3>
-<pre><code>
+<pre>
+```cpp
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -747,8 +734,5 @@ CudaRenderer::render() {
     // Synchronize after rendering to ensure completion before potential image copy
     cudaCheckError(cudaDeviceSynchronize());
 }
-
-</code></pre>
-
-</body>
-</html>
+```
+</pre>
