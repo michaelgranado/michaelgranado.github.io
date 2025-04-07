@@ -821,14 +821,141 @@ __global__ void kernelRenderCirclesTiled() {
     *imgPtr = pixelColor;
 }
 
+#define BATCH_SIZE 64
+
+__global__ void kernelRenderCirclesOptimized() {
+    // Get the global pixel index for this thread
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int imageWidth = cuConstRendererParams.imageWidth;
+    int imageHeight = cuConstRendererParams.imageHeight;
+
+    // Check if this thread's pixel is within the image bounds
+    if (pixelX >= imageWidth || pixelY >= imageHeight)
+        return;
+
+    // Compute the normalized pixel center
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                        invHeight * (static_cast<float>(pixelY) + 0.5f));
+
+    // Get a pointer to this pixel's color data
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+
+    // Use a local accumulator for the pixel color
+    float4 pixelColor = *imgPtr;
+
+    // Define the pixel's box for conservative circle intersection test
+    float halfInvWidth = 0.5f * invWidth;
+    float halfInvHeight = 0.5f * invHeight;
+    float boxL = pixelCenterNorm.x - halfInvWidth;
+    float boxR = pixelCenterNorm.x + halfInvWidth;
+    float boxB = pixelCenterNorm.y - halfInvHeight;
+    float boxT = pixelCenterNorm.y + halfInvHeight;
+
+    // Define the tile's box for the entire thread block
+    float tileL = invWidth * (blockIdx.x * blockDim.x);
+    float tileR = invWidth * ((blockIdx.x + 1) * blockDim.x);
+    float tileB = invHeight * (blockIdx.y * blockDim.y);
+    float tileT = invHeight * ((blockIdx.y + 1) * blockDim.y);
+
+    // Shared memory for the current batch of circles
+    __shared__ float3 positions[BATCH_SIZE];
+    __shared__ float radii[BATCH_SIZE];
+    __shared__ float3 colors[BATCH_SIZE];
+    __shared__ bool overlaps[BATCH_SIZE];
+
+    // Linear thread index for loading circle data
+    int linearThreadIdx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    // Process circles in batches to ensure correct ordering
+    for (int batchStart = 0; batchStart < cuConstRendererParams.numCircles; batchStart += BATCH_SIZE) {
+        int batchEnd = min(batchStart + BATCH_SIZE, cuConstRendererParams.numCircles);
+        int batchSize = batchEnd - batchStart;
+
+        // Collaboratively load circle data for this batch into shared memory
+        for (int i = linearThreadIdx; i < batchSize; i += blockDim.x * blockDim.y) {
+            int circleIdx = batchStart + i;
+            int index3 = 3 * circleIdx;
+
+            positions[i] = *(float3*)(&cuConstRendererParams.position[index3]);
+            radii[i] = cuConstRendererParams.radius[circleIdx];
+            colors[i] = *(float3*)(&cuConstRendererParams.color[index3]);
+
+            // Check if this circle overlaps with the tile
+            overlaps[i] = circleInBoxConservative(
+                positions[i].x, positions[i].y, radii[i],
+                tileL, tileR, tileT, tileB);
+        }
+        __syncthreads();
+
+        // Each thread processes its pixel for the current batch of circles
+        for (int i = 0; i < batchSize; i++) {
+            // Skip circles that don't overlap with the tile
+            if (!overlaps[i])
+                continue;
+
+            float3 p = positions[i];
+            float rad = radii[i];
+
+            // Check if the circle overlaps with this specific pixel
+            if (!circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB))
+                continue;
+
+            // Compute the distance from pixel center to circle center
+            float diffX = p.x - pixelCenterNorm.x;
+            float diffY = p.y - pixelCenterNorm.y;
+            float pixelDist = diffX * diffX + diffY * diffY;
+            float maxDist = rad * rad;
+
+            // If pixel is within the circle, update its color
+            if (pixelDist <= maxDist) {
+                // Compute the color of the circle at this pixel
+                float3 rgb;
+                float alpha;
+
+                if (cuConstRendererParams.sceneName == SNOWFLAKES ||
+                    cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+                    const float kCircleMaxAlpha = .5f;
+                    const float falloffScale = 4.f;
+
+                    float normPixelDist = sqrt(pixelDist) / rad;
+                    rgb = lookupColor(normPixelDist);
+
+                    float maxAlpha = .6f + .4f * (1.f-p.z);
+                    maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f);
+                    alpha = maxAlpha * exp(-1.f * falloffScale * normPixelDist * normPixelDist);
+                } else {
+                    // simple: each circle has an assigned color
+                    rgb = colors[i];
+                    alpha = .5f;
+                }
+
+                float oneMinusAlpha = 1.f - alpha;
+
+                // Update the local accumulator with this circle's contribution
+                pixelColor.x = alpha * rgb.x + oneMinusAlpha * pixelColor.x;
+                pixelColor.y = alpha * rgb.y + oneMinusAlpha * pixelColor.y;
+                pixelColor.z = alpha * rgb.z + oneMinusAlpha * pixelColor.z;
+                pixelColor.w = alpha + pixelColor.w;
+            }
+        }
+        __syncthreads();
+    }
+
+    // Write the final color back to global memory (only once per pixel)
+    *imgPtr = pixelColor;
+}
+
 void
 CudaRenderer::render() {
-    // Set up a 2D grid of threads, where each thread processes one pixel
     dim3 blockDim(16, 16);
     dim3 gridDim(
         (image->width + blockDim.x - 1) / blockDim.x,
         (image->height + blockDim.y - 1) / blockDim.y);
 
-    kernelRenderCirclesTiled<<<gridDim, blockDim>>>();
+    kernelRenderCirclesOptimized<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }
