@@ -1,0 +1,867 @@
+```html
+<problem_description>
+The current rendering kernel, `kernelRenderCirclesTiled`, iterates through every single circle for every pixel being rendered. Although it uses a conservative tile-based culling check (`circleInBoxConservative`) to potentially skip the detailed point-in-circle test for circles far from the pixel's tile (thread block), this check itself must still be performed for all circles. In scenes with a large number of circles (like `rand100k`, `rand1M`, `micro2M`), each pixel thread performs an excessive amount of redundant work checking circles that are nowhere near it. This leads to poor performance as the workload scales linearly with the number of circles for every pixel.
+</problem_description>
+
+<problem_reasoning>
+The core issue is the lack of an efficient spatial data structure to quickly prune the set of circles that need to be considered for a given pixel or tile. The current `kernelRenderCirclesTiled` implements a pixel-parallel approach where each thread handles one pixel. While this parallelizes across pixels, the work *within* each thread (iterating through potentially millions of circles) is inefficient. The tile culling helps but is insufficient because the culling check itself is performed for every circle against every tile. A better approach would be to pre-process the circles into a spatial structure (like a grid or bins) so that each pixel thread only needs to examine circles located within its corresponding spatial region(s). This significantly reduces the number of circles each thread processes, especially in sparse scenes or scenes with high circle counts.
+</problem_reasoning>
+
+<proposed_remedy>
+Implement a spatial binning (grid-based) approach to accelerate rendering. This involves the following steps:
+
+1.  **Preprocessing (executed once per frame before rendering):**
+    *   Define a 2D grid (e.g., 32x32 or 64x64 cells) covering the rendering space ([0,1] x [0,1]).
+    *   **Kernel 1:** Calculate how many grid cells each circle overlaps.
+    *   **Thrust Scan:** Perform an exclusive scan on the cell counts per circle to determine the total number of circle-cell overlaps (`total_pairs`) and the starting offset for each circle in a flattened list of pairs.
+    *   **Kernel 2:** Create a flattened list of `(cell_id, original_circle_index)` pairs. Each circle thread writes its overlapping `(cell_id, circle_index)` pairs to the correct location in the global list using the offsets from the scan.
+    *   **Thrust Sort:** Perform a stable sort on the pairs using `cell_id` as the primary key (`thrust::stable_sort_by_key`). This groups all circle indices belonging to the same cell together, and crucially, the stable sort preserves the original relative order of circles within each cell group, satisfying the rendering order requirement.
+    *   **Thrust Reduce/Scan:** Use `thrust::reduce_by_key` to find the unique cell IDs present in the sorted keys and count how many circles belong to each (`run_counts`). Then, perform an exclusive scan on these `run_counts` to find the starting index (`run_starts`) of each cell's circle list within the sorted `d_circle_indices_vals` array.
+    *   **Kernel 3:** Populate dense lookup tables (`d_dense_cell_pointers`, `d_dense_cell_counts`) of size `gridCells`. For each unique cell ID found, store its corresponding start index and count from the reduce/scan steps into these dense arrays. Initialize entries for cells with no circles to indicate they are empty (e.g., pointer = -1, count = 0).
+
+2.  **Rendering Kernel (`kernelRenderCirclesBinned`):**
+    *   Launch a 2D grid of threads, one per pixel.
+    *   Each thread calculates its pixel coordinates and determines the `cell_id` it belongs to based on the predefined grid.
+    *   The thread looks up the `start_index` and `count` for its `cell_id` from the `d_dense_cell_pointers` and `d_dense_cell_counts` arrays created during preprocessing.
+    *   If `count` is 0, the thread returns (no circles in this cell).
+    *   Otherwise, the thread iterates only from `i = 0` to `count - 1`. In each iteration:
+        *   It retrieves the `original_circle_index` from the sorted list: `circleIndex = d_circle_indices_vals[start_index + i]`.
+        *   It fetches the data for `circleIndex` (position, radius, color).
+        *   It performs the point-in-circle test for the current pixel center.
+        *   If the pixel is inside the circle, it calculates the color contribution and blends it into a local accumulator variable (registers).
+    *   After iterating through the relevant circles for its cell, the thread writes the final accumulated color to global image memory once.
+
+This approach replaces the N-circle loop per pixel with a much smaller loop over only the circles relevant to the pixel's grid cell, significantly reducing computation, especially for large N.
+</proposed_remedy>
+
+<remedy_reasoning>
+1.  **Why it fixes the problem:** The proposed remedy directly addresses the bottleneck of iterating through all circles per pixel. By using spatial binning, each pixel thread only considers circles that actually overlap its corresponding grid cell. The preprocessing step efficiently organizes the circles into these bins using parallel kernels and Thrust library functions for sorting and reduction. The rendering kernel then uses this structure to perform significantly less work per pixel, especially when the number of circles (`numCircles`) is much larger than the average number of circles overlapping a single grid cell. The use of `thrust::stable_sort_by_key` ensures that the original circle order is maintained within each bin, satisfying the correctness requirement for transparency rendering.
+
+2.  **Expected program results:**
+    *   **Correctness:** The results should remain correct and pass all checker tests, as the atomicity (single write per pixel) and order (stable sort within bins) requirements are maintained.
+    *   **Performance:**
+        *   For scenes with a small number of circles (`rgb`, `pattern`), the performance might be slightly worse due to the overhead of the binning preprocessing step.
+        *   For scenes with a large number of circles (`rand10k`, `rand100k`, `snowsingle`, `biglittle`, `rand1M`, `micro2M`), the performance should improve significantly. The reduction in work during the rendering kernel is expected to far outweigh the preprocessing overhead. The improvement should be particularly large for `rand1M` and `micro2M`. The `micro2M` scene might see exceptional speedup because most grid cells will contain very few (or zero) circles after binning. The overall score should increase substantially due to major improvements on the high-circle-count test cases.
+</remedy_reasoning>
+
+```cpp
+#include <string>
+#include <algorithm>
+#include <math.h>
+#include <stdio.h>
+#include <vector>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <driver_functions.h>
+
+// Includes for Thrust
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/scan.h>
+#include <thrust/sort.h>
+#include <thrust/reduce.h>
+#include <thrust/iterator/constant_iterator.h>
+#include <thrust/execution_policy.h> // Optional: for specifying execution policy like thrust::device
+
+#include "cudaRenderer.h"
+#include "image.h"
+#include "noise.h"
+#include "sceneLoader.h"
+#include "util.h"
+
+// Use cudaCheckError wrapper for debugging memory allocation issues
+#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
+inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+    if (code != cudaSuccess)
+    {
+        fprintf(stderr, "CUDA Error: %s at %s:%d\\n",
+                cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
+
+// Define Grid dimensions for binning
+#define GRID_DIM_X 32
+#define GRID_DIM_Y 32
+#define TOTAL_GRID_CELLS (GRID_DIM_X * GRID_DIM_Y)
+
+////////////////////////////////////////////////////////////////////////////////////////
+// Putting all the cuda kernels here
+///////////////////////////////////////////////////////////////////////////////////////
+
+struct GlobalConstants {
+    SceneName sceneName;
+    int numCircles;
+    float* position;
+    float* velocity;
+    float* color;
+    float* radius;
+
+    int imageWidth;
+    int imageHeight;
+    float* imageData;
+
+    // Grid parameters (can also be passed as kernel args if preferred)
+    int gridDimX;
+    int gridDimY;
+    int totalGridCells;
+    float invGridDimX;
+    float invGridDimY;
+
+    // Pointers for binned data
+    int* cellCircleIndices;  // Sorted circle indices, grouped by cell
+    int* cellPointers;       // Start index for each cell in cellCircleIndices
+    int* cellCounts;         // Number of circles for each cell
+};
+
+// Global variable that is in scope, but read-only, for all cuda
+// kernels.
+__constant__ GlobalConstants cuConstRendererParams;
+
+// read-only lookup tables used to quickly compute noise
+__constant__ int    cuConstNoiseYPermutationTable[256];
+__constant__ int    cuConstNoiseXPermutationTable[256];
+__constant__ float  cuConstNoise1DValueTable[256];
+
+// color ramp table needed for the color ramp lookup shader
+#define COLOR_MAP_SIZE 5
+__constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
+
+
+// including parts of the CUDA code from external files
+#include "noiseCuda.cu_inl"
+#include "lookupColor.cu_inl"
+#include "circleBoxTest.cu_inl" // Include the circle-box test functions
+
+
+// kernelClearImageSnowflake -- (UNCHANGED)
+__global__ void kernelClearImageSnowflake() {
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
+
+    if (imageX >= width || imageY >= height)
+        return;
+
+    int offset = 4 * (imageY * width + imageX);
+    float shade = .4f + .45f * static_cast<float>(height-imageY) / height;
+    float4 value = make_float4(shade, shade, shade, 1.f);
+    *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
+}
+
+// kernelClearImage -- (UNCHANGED)
+__global__ void kernelClearImage(float r, float g, float b, float a) {
+    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
+    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int width = cuConstRendererParams.imageWidth;
+    int height = cuConstRendererParams.imageHeight;
+
+    if (imageX >= width || imageY >= height)
+        return;
+
+    int offset = 4 * (imageY * width + imageX);
+    float4 value = make_float4(r, g, b, a);
+    *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
+}
+
+// Animation Kernels (kernelAdvance*) -- (UNCHANGED)
+__global__ void kernelAdvanceFireWorks() {
+    const float dt = 1.f / 60.f;
+    const float pi = 3.14159;
+    const float maxDist = 0.25f;
+
+    float* velocity = cuConstRendererParams.velocity;
+    float* position = cuConstRendererParams.position;
+    float* radius = cuConstRendererParams.radius;
+
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= cuConstRendererParams.numCircles)
+        return;
+    if (0 <= index && index < NUM_FIREWORKS) { // firework center; no update
+        return;
+    }
+    int fIdx = (index - NUM_FIREWORKS) / NUM_SPARKS;
+    int sfIdx = (index - NUM_FIREWORKS) % NUM_SPARKS;
+    int index3i = 3 * fIdx;
+    int sIdx = NUM_FIREWORKS + fIdx * NUM_SPARKS + sfIdx;
+    int index3j = 3 * sIdx;
+    float cx = position[index3i];
+    float cy = position[index3i+1];
+    position[index3j] += velocity[index3j] * dt;
+    position[index3j+1] += velocity[index3j+1] * dt;
+    float sx = position[index3j];
+    float sy = position[index3j+1];
+    float cxsx = sx - cx;
+    float cysy = sy - cy;
+    float dist = sqrt(cxsx * cxsx + cysy * cysy);
+    if (dist > maxDist) {
+        float angle = (sfIdx * 2 * pi)/NUM_SPARKS;
+        float sinA = sin(angle);
+        float cosA = cos(angle);
+        float x = cosA * radius[fIdx];
+        float y = sinA * radius[fIdx];
+        position[index3j] = position[index3i] + x;
+        position[index3j+1] = position[index3i+1] + y;
+        position[index3j+2] = 0.0f;
+        velocity[index3j] = cosA/5.0;
+        velocity[index3j+1] = sinA/5.0;
+        velocity[index3j+2] = 0.0f;
+    }
+}
+__global__ void kernelAdvanceHypnosis() {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= cuConstRendererParams.numCircles) return;
+    float* radius = cuConstRendererParams.radius;
+    float cutOff = 0.5f;
+    if (radius[index] > cutOff) { radius[index] = 0.02f; }
+    else { radius[index] += 0.01f; }
+}
+__global__ void kernelAdvanceBouncingBalls() {
+    const float dt = 1.f / 60.f;
+    const float kGravity = -2.8f;
+    const float kDragCoeff = -0.8f;
+    const float epsilon = 0.001f;
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= cuConstRendererParams.numCircles) return;
+    float* velocity = cuConstRendererParams.velocity;
+    float* position = cuConstRendererParams.position;
+    int index3 = 3 * index;
+    float oldVelocity = velocity[index3+1];
+    float oldPosition = position[index3+1];
+    if (oldVelocity == 0.f && oldPosition == 0.f) return;
+    if (position[index3+1] < 0 && oldVelocity < 0.f) { velocity[index3+1] *= kDragCoeff; }
+    velocity[index3+1] += kGravity * dt;
+    position[index3+1] += velocity[index3+1] * dt;
+    if (fabsf(velocity[index3+1] - oldVelocity) < epsilon && oldPosition < 0.0f && fabsf(position[index3+1]-oldPosition) < epsilon) {
+        velocity[index3+1] = 0.f; position[index3+1] = 0.f;
+    }
+}
+__global__ void kernelAdvanceSnowflake() {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= cuConstRendererParams.numCircles) return;
+    const float dt = 1.f / 60.f; const float kGravity = -1.8f; const float kDragCoeff = 2.f;
+    int index3 = 3 * index;
+    float* positionPtr = &cuConstRendererParams.position[index3];
+    float* velocityPtr = &cuConstRendererParams.velocity[index3];
+    float3 position = *((float3*)positionPtr); float3 velocity = *((float3*)velocityPtr);
+    float forceScaling = fmin(fmax(1.f - position.z, .1f), 1.f);
+    float3 noiseInput; noiseInput.x = 10.f * position.x; noiseInput.y = 10.f * position.y; noiseInput.z = 255.f * position.z;
+    float2 noiseForce = cudaVec2CellNoise(noiseInput, index); noiseForce.x *= 7.5f; noiseForce.y *= 5.f;
+    float2 dragForce; dragForce.x = -1.f * kDragCoeff * velocity.x; dragForce.y = -1.f * kDragCoeff * velocity.y;
+    position.x += velocity.x * dt; position.y += velocity.y * dt;
+    velocity.x += forceScaling * (noiseForce.x + dragForce.y) * dt;
+    velocity.y += forceScaling * (kGravity + noiseForce.y + dragForce.y) * dt;
+    float radius = cuConstRendererParams.radius[index];
+    if ((position.y + radius < 0.f) || (position.x + radius) < -0.f || (position.x - radius) > 1.f) {
+        noiseInput.x = 255.f * position.x; noiseInput.y = 255.f * position.y; noiseInput.z = 255.f * position.z;
+        noiseForce = cudaVec2CellNoise(noiseInput, index);
+        position.x = .5f + .5f * noiseForce.x; position.y = 1.35f + radius;
+        velocity.x = 2.f * noiseForce.y; velocity.y = 0.f;
+    }
+    *((float3*)positionPtr) = position; *((float3*)velocityPtr) = velocity;
+}
+
+
+// *************************************************************************
+// ** NEW KERNELS FOR BINNING PREPROCESSING **
+// *************************************************************************
+
+// Kernel 1: Count how many cells each circle overlaps
+__global__ void kernelCountCellsPerCircle(
+    int numCircles,
+    const float* position,
+    const float* radius,
+    int gridDimX, int gridDimY,
+    float invGridDimX, float invGridDimY,
+    int* d_num_cells_per_circle)
+{
+    int circleIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    if (circleIndex >= numCircles) return;
+
+    float px = position[3 * circleIndex];
+    float py = position[3 * circleIndex + 1];
+    float rad = radius[circleIndex];
+
+    // Calculate circle bounding box in normalized coordinates
+    float circleL = px - rad;
+    float circleR = px + rad;
+    float circleB = py - rad;
+    float circleT = py + rad;
+
+    // Find overlapping cell range (clamp to grid boundaries)
+    int minCellX = max(0, static_cast<int>(floorf(circleL * gridDimX)));
+    int maxCellX = min(gridDimX - 1, static_cast<int>(floorf(circleR * gridDimX)));
+    int minCellY = max(0, static_cast<int>(floorf(circleB * gridDimY)));
+    int maxCellY = min(gridDimY - 1, static_cast<int>(floorf(circleT * gridDimY)));
+
+    int count = 0;
+    for (int cy = minCellY; cy <= maxCellY; ++cy) {
+        for (int cx = minCellX; cx <= maxCellX; ++cx) {
+            // Check actual intersection with cell boundaries
+            float cellL = static_cast<float>(cx) * invGridDimX;
+            float cellR = static_cast<float>(cx + 1) * invGridDimX;
+            float cellB = static_cast<float>(cy) * invGridDimY;
+            float cellT = static_cast<float>(cy + 1) * invGridDimY;
+
+            if (circleInBox(px, py, rad, cellL, cellR, cellT, cellB)) {
+                count++;
+            }
+        }
+    }
+    d_num_cells_per_circle[circleIndex] = count;
+}
+
+
+// Kernel 2: Fill the (cell_id, circle_index) pairs list
+__global__ void kernelFillPairs(
+    int numCircles,
+    const float* position,
+    const float* radius,
+    int gridDimX, int gridDimY,
+    float invGridDimX, float invGridDimY,
+    const int* d_write_offsets,
+    int* d_cell_keys,
+    int* d_circle_indices_vals)
+{
+    int circleIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    if (circleIndex >= numCircles) return;
+
+    float px = position[3 * circleIndex];
+    float py = position[3 * circleIndex + 1];
+    float rad = radius[circleIndex];
+
+    // Calculate circle bounding box
+    float circleL = px - rad;
+    float circleR = px + rad;
+    float circleB = py - rad;
+    float circleT = py + rad;
+
+    // Find overlapping cell range
+    int minCellX = max(0, static_cast<int>(floorf(circleL * gridDimX)));
+    int maxCellX = min(gridDimX - 1, static_cast<int>(floorf(circleR * gridDimX)));
+    int minCellY = max(0, static_cast<int>(floorf(circleB * gridDimY)));
+    int maxCellY = min(gridDimY - 1, static_cast<int>(floorf(circleT * gridDimY)));
+
+    int write_base = d_write_offsets[circleIndex];
+    int current_offset = 0;
+
+    for (int cy = minCellY; cy <= maxCellY; ++cy) {
+        for (int cx = minCellX; cx <= maxCellX; ++cx) {
+            float cellL = static_cast<float>(cx) * invGridDimX;
+            float cellR = static_cast<float>(cx + 1) * invGridDimX;
+            float cellB = static_cast<float>(cy) * invGridDimY;
+            float cellT = static_cast<float>(cy + 1) * invGridDimY;
+
+            if (circleInBox(px, py, rad, cellL, cellR, cellT, cellB)) {
+                int cellId = cy * gridDimX + cx;
+                int write_pos = write_base + current_offset;
+                d_cell_keys[write_pos] = cellId;
+                d_circle_indices_vals[write_pos] = circleIndex;
+                current_offset++;
+            }
+        }
+    }
+}
+
+// Kernel 3: Fill the dense lookup tables for cell pointers and counts
+__global__ void kernelFillDensePointers(
+    int num_unique_keys,
+    const int* d_unique_keys,      // Unique cell IDs that have circles
+    const int* d_run_starts,       // Start index for each unique key in sorted array
+    const int* d_run_counts,       // Count for each unique key
+    int* d_dense_cell_pointers, // Output: Start index for *every* cell ID
+    int* d_dense_cell_counts)   // Output: Count for *every* cell ID
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_unique_keys) return;
+
+    int cell_id = d_unique_keys[i];
+    int start_index = d_run_starts[i];
+    int count = d_run_counts[i];
+
+    d_dense_cell_pointers[cell_id] = start_index;
+    d_dense_cell_counts[cell_id] = count;
+}
+
+
+// *************************************************************************
+// ** NEW RENDERING KERNEL USING BINNED DATA **
+// *************************************************************************
+
+__global__ void kernelRenderCirclesBinned() {
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int imageWidth = cuConstRendererParams.imageWidth;
+    int imageHeight = cuConstRendererParams.imageHeight;
+
+    // Check if this thread's pixel is within the image bounds
+    if (pixelX >= imageWidth || pixelY >= imageHeight)
+        return;
+
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+
+    // Calculate normalized coordinates for the pixel center
+    float pixelCenterXNorm = invWidth * (static_cast<float>(pixelX) + 0.5f);
+    float pixelCenterYNorm = invHeight * (static_cast<float>(pixelY) + 0.5f);
+
+    // Determine which grid cell this pixel belongs to
+    int cellX = min(cuConstRendererParams.gridDimX - 1, static_cast<int>(floorf(pixelCenterXNorm * cuConstRendererParams.gridDimX)));
+    int cellY = min(cuConstRendererParams.gridDimY - 1, static_cast<int>(floorf(pixelCenterYNorm * cuConstRendererParams.gridDimY)));
+    int cellId = cellY * cuConstRendererParams.gridDimX + cellX;
+
+    // Look up the list of circles for this cell
+    int cellStart = cuConstRendererParams.cellPointers[cellId];
+    int cellCount = cuConstRendererParams.cellCounts[cellId];
+
+    // Get a pointer to this pixel's color data in global memory
+    int pixelOffset = 4 * (pixelY * imageWidth + pixelX);
+    float4* imgPtrGlobal = (float4*)(&cuConstRendererParams.imageData[pixelOffset]);
+
+    // Initialize accumulated color locally (in registers)
+    // Read the initial background color for this pixel (set by clearImage)
+    float4 accumulatedColor = *imgPtrGlobal;
+
+    // If the cell is empty, just write the background color back (or do nothing if clear already did)
+    if (cellCount == 0) {
+         *imgPtrGlobal = accumulatedColor; // Ensure write happens even if empty
+         return;
+    }
+
+    // Process circles relevant to this cell, in order
+    for (int i = 0; i < cellCount; i++) {
+        int circleIndex = cuConstRendererParams.cellCircleIndices[cellStart + i];
+
+        // Read circle data (position, radius are needed for test)
+        int index3 = 3 * circleIndex;
+        float px = cuConstRendererParams.position[index3];
+        float py = cuConstRendererParams.position[index3 + 1];
+        float pz = cuConstRendererParams.position[index3 + 2]; // Needed for snow shading
+        float rad = cuConstRendererParams.radius[circleIndex];
+
+        // Compute the distance squared from pixel center to circle center
+        float diffX = px - pixelCenterXNorm;
+        float diffY = py - pixelCenterYNorm;
+        float pixelDistSq = diffX * diffX + diffY * diffY;
+        float maxDistSq = rad * rad;
+
+        // If pixel is within the circle's radius squared, compute color and blend locally
+        if (pixelDistSq <= maxDistSq) {
+            // --- Inlined shading and blending logic ---
+            float3 rgb;
+            float alpha;
+
+            // Determine base color and alpha based on scene type
+            if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+                const float kCircleMaxAlpha = .5f;
+                const float falloffScale = 4.f;
+
+                float pixelDist = sqrtf(pixelDistSq); // Need sqrt for lookupColor
+                float normPixelDist = (rad > 1e-6f) ? (pixelDist / rad) : 0.f; // Avoid division by zero/small radius
+                rgb = lookupColor(normPixelDist);
+
+                float maxAlpha = .6f + .4f * (1.f-pz);
+                maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f); // kCircleMaxAlpha * clamped value
+
+                alpha = maxAlpha * expf(-1.f * falloffScale * normPixelDist * normPixelDist);
+
+            } else {
+                // Simple: each circle has an assigned color
+                rgb = *(float3*)&(cuConstRendererParams.color[index3]);
+                alpha = .5f; // Use fixed alpha
+            }
+
+            // Blend with the *accumulated* color using standard over operator
+            float oneMinusAlpha = 1.f - alpha;
+            accumulatedColor.x = alpha * rgb.x + oneMinusAlpha * accumulatedColor.x;
+            accumulatedColor.y = alpha * rgb.y + oneMinusAlpha * accumulatedColor.y;
+            accumulatedColor.z = alpha * rgb.z + oneMinusAlpha * accumulatedColor.z;
+            // Keep original alpha accumulation logic if needed for correctness checks,
+            // though final image usually ignores output alpha.
+            // If output alpha matters, this might need adjustment based on 'over' operator.
+            // For now, keep the sum as it was in the original correct code.
+            accumulatedColor.w = alpha + accumulatedColor.w;
+            // --- End inlined shading and blending logic ---
+        }
+    } // End loop over circles in cell
+
+    // Write the final accumulated color to global memory ONCE
+    *imgPtrGlobal = accumulatedColor;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+// CudaRenderer Class Implementation
+////////////////////////////////////////////////////////////////////////////////////////
+
+CudaRenderer::CudaRenderer() {
+    image = NULL;
+
+    numCircles = 0;
+    position = NULL;
+    velocity = NULL;
+    color = NULL;
+    radius = NULL;
+
+    cudaDevicePosition = NULL;
+    cudaDeviceVelocity = NULL;
+    cudaDeviceColor = NULL;
+    cudaDeviceRadius = NULL;
+    cudaDeviceImageData = NULL;
+
+    // Binning related members
+    d_cell_circle_indices = NULL;
+    d_dense_cell_pointers = NULL;
+    d_dense_cell_counts = NULL;
+    gridDimX = GRID_DIM_X;
+    gridDimY = GRID_DIM_Y;
+    totalGridCells = TOTAL_GRID_CELLS;
+}
+
+CudaRenderer::~CudaRenderer() {
+    if (image) {
+        delete image;
+    }
+
+    if (position) {
+        delete [] position;
+        delete [] velocity;
+        delete [] color;
+        delete [] radius;
+    }
+
+    // Free base CUDA allocations
+    if (cudaDevicePosition) cudaFree(cudaDevicePosition);
+    if (cudaDeviceVelocity) cudaFree(cudaDeviceVelocity);
+    if (cudaDeviceColor) cudaFree(cudaDeviceColor);
+    if (cudaDeviceRadius) cudaFree(cudaDeviceRadius);
+    if (cudaDeviceImageData) cudaFree(cudaDeviceImageData);
+
+    // Free binning CUDA allocations
+    if (d_cell_circle_indices) cudaFree(d_cell_circle_indices);
+    if (d_dense_cell_pointers) cudaFree(d_dense_cell_pointers);
+    if (d_dense_cell_counts) cudaFree(d_dense_cell_counts);
+}
+
+const Image* CudaRenderer::getImage() {
+    // Copy rendered image from device memory to host
+    cudaCheckError(cudaMemcpy(image->data,
+                              cudaDeviceImageData,
+                              sizeof(float) * 4 * image->width * image->height,
+                              cudaMemcpyDeviceToHost));
+    return image;
+}
+
+void CudaRenderer::loadScene(SceneName scene) {
+    sceneName = scene;
+    loadCircleScene(sceneName, numCircles, position, velocity, color, radius);
+}
+
+void CudaRenderer::setup() {
+    int deviceCount = 0;
+    cudaCheckError(cudaGetDeviceCount(&deviceCount));
+    printf("---------------------------------------------------------\\n");
+    printf("Initializing CUDA for CudaRenderer (Binning Version)\\n");
+    printf("Found %d CUDA devices\\n", deviceCount);
+    // ... (rest of device printing) ...
+    printf("Using spatial grid: %d x %d = %d cells\\n", gridDimX, gridDimY, totalGridCells);
+    printf("---------------------------------------------------------\\n");
+
+    // Allocate and copy base circle data
+    cudaCheckError(cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numCircles));
+    cudaCheckError(cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numCircles));
+    cudaCheckError(cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numCircles));
+    cudaCheckError(cudaMalloc(&cudaDeviceRadius, sizeof(float) * numCircles));
+    cudaCheckError(cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image->width * image->height));
+
+    cudaCheckError(cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
+    cudaCheckError(cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
+    cudaCheckError(cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
+    cudaCheckError(cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numCircles, cudaMemcpyHostToDevice));
+
+    // Allocate memory for the dense grid lookup tables (pointers and counts)
+    // These persist across frames, but their contents are rebuilt each frame by buildSpatialGrid
+    cudaCheckError(cudaMalloc(&d_dense_cell_pointers, sizeof(int) * totalGridCells));
+    cudaCheckError(cudaMalloc(&d_dense_cell_counts, sizeof(int) * totalGridCells));
+
+    // d_cell_circle_indices is allocated dynamically within buildSpatialGrid
+
+    // Set up constant memory parameters (excluding binning pointers initially)
+    GlobalConstants params;
+    params.sceneName = sceneName;
+    params.numCircles = numCircles;
+    params.imageWidth = image->width;
+    params.imageHeight = image->height;
+    params.position = cudaDevicePosition;
+    params.velocity = cudaDeviceVelocity;
+    params.color = cudaDeviceColor;
+    params.radius = cudaDeviceRadius;
+    params.imageData = cudaDeviceImageData;
+    params.gridDimX = gridDimX;
+    params.gridDimY = gridDimY;
+    params.totalGridCells = totalGridCells;
+    params.invGridDimX = 1.f / gridDimX;
+    params.invGridDimY = 1.f / gridDimY;
+    // Binning pointers will be set later, copy the rest now
+    params.cellCircleIndices = NULL;
+    params.cellPointers = NULL;
+    params.cellCounts = NULL;
+
+    cudaCheckError(cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants)));
+
+    // Copy noise and color tables (UNCHANGED)
+    int* permX; int* permY; float* value1D;
+    getNoiseTables(&permX, &permY, &value1D);
+    cudaCheckError(cudaMemcpyToSymbol(cuConstNoiseXPermutationTable, permX, sizeof(int) * 256));
+    cudaCheckError(cudaMemcpyToSymbol(cuConstNoiseYPermutationTable, permY, sizeof(int) * 256));
+    cudaCheckError(cudaMemcpyToSymbol(cuConstNoise1DValueTable, value1D, sizeof(float) * 256));
+    float lookupTable[COLOR_MAP_SIZE][3] = {{1.f, 1.f, 1.f}, {1.f, 1.f, 1.f}, {.8f, .9f, 1.f}, {.8f, .9f, 1.f}, {.8f, 0.8f, 1.f}};
+    cudaCheckError(cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE));
+}
+
+void CudaRenderer::allocOutputImage(int width, int height) {
+    if (image) delete image;
+    image = new Image(width, height);
+}
+
+void CudaRenderer::clearImage() {
+    dim3 blockDim(16, 16);
+    dim3 gridDim((image->width + blockDim.x - 1) / blockDim.x, (image->height + blockDim.y - 1) / blockDim.y);
+
+    if (sceneName == SNOWFLAKES || sceneName == SNOWFLAKES_SINGLE_FRAME) {
+        kernelClearImageSnowflake<<<gridDim, blockDim>>>();
+    } else {
+        // Clear with alpha = 1, needed for correct accumulation start
+        kernelClearImage<<<gridDim, blockDim>>>(1.f, 1.f, 1.f, 1.f);
+    }
+    cudaCheckError(cudaGetLastError());
+}
+
+void CudaRenderer::advanceAnimation() {
+    dim3 blockDim(256, 1);
+    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+
+    if (sceneName == SNOWFLAKES) kernelAdvanceSnowflake<<<gridDim, blockDim>>>();
+    else if (sceneName == BOUNCING_BALLS) kernelAdvanceBouncingBalls<<<gridDim, blockDim>>>();
+    else if (sceneName == HYPNOSIS) kernelAdvanceHypnosis<<<gridDim, blockDim>>>();
+    else if (sceneName == FIREWORKS) kernelAdvanceFireWorks<<<gridDim, blockDim>>>();
+
+    cudaCheckError(cudaGetLastError());
+}
+
+// Helper function to build the spatial grid
+void CudaRenderer::buildSpatialGrid() {
+    if (numCircles == 0) return; // No circles, nothing to bin
+
+    // Thrust device vectors for intermediate results
+    thrust::device_vector<int> d_num_cells_per_circle(numCircles);
+    thrust::device_vector<int> d_write_offsets(numCircles);
+
+    // Kernel 1: Count cells per circle
+    dim3 blockDim1(256);
+    dim3 gridDim1((numCircles + blockDim1.x - 1) / blockDim1.x);
+    kernelCountCellsPerCircle<<<gridDim1, blockDim1>>>(
+        numCircles, cudaDevicePosition, cudaDeviceRadius,
+        gridDimX, gridDimY, 1.f / gridDimX, 1.f / gridDimY,
+        thrust::raw_pointer_cast(d_num_cells_per_circle.data()));
+    cudaCheckError(cudaGetLastError());
+
+    // Thrust Scan: Compute write offsets and total pairs
+    thrust::exclusive_scan(thrust::device, d_num_cells_per_circle.begin(), d_num_cells_per_circle.end(), d_write_offsets.begin());
+    cudaCheckError(cudaGetLastError());
+
+    // Get total number of pairs (last offset + last count)
+    // Need to transfer last element of offsets and counts to host, or do reduction on device.
+    // Simpler: use intermediate vector sum or copy last element.
+    int last_offset = 0;
+    int last_count = 0;
+    if (numCircles > 0) {
+      last_offset = d_write_offsets[numCircles - 1]; // Get last offset via indexing (potentially slow)
+      last_count = d_num_cells_per_circle[numCircles-1]; // Get last count
+    }
+    int total_pairs = last_offset + last_count;
+
+    // Allocate/Reallocate storage for pairs if necessary
+    // Note: Could potentially reuse memory across frames if max total_pairs is known/stable
+    if (currentPairCapacity < total_pairs) {
+        if (d_cell_circle_indices) cudaFree(d_cell_circle_indices); // Free old index list
+        // Also need keys for sorting
+        if (d_cell_keys_temp) cudaFree(d_cell_keys_temp);
+
+        cudaCheckError(cudaMalloc(&d_cell_circle_indices, total_pairs * sizeof(int)));
+        cudaCheckError(cudaMalloc(&d_cell_keys_temp, total_pairs * sizeof(int)));
+        currentPairCapacity = total_pairs;
+        printf("Reallocated binning storage to %d pairs\n", total_pairs);
+    }
+     if (total_pairs == 0 && currentPairCapacity > 0) {
+        // Handle edge case where scene becomes empty
+        // No need to free here, just skip subsequent steps. Keep capacity.
+    } else if (total_pairs == 0) {
+         // Scene starts empty, nothing to do.
+         // Ensure dense pointers/counts are cleared later if they weren't already.
+         cudaCheckError(cudaMemset(d_dense_cell_pointers, -1, totalGridCells * sizeof(int)));
+         cudaCheckError(cudaMemset(d_dense_cell_counts, 0, totalGridCells * sizeof(int)));
+         return; // Skip rest of binning if no pairs generated
+    }
+
+
+    // Kernel 2: Fill pairs (cell keys and circle indices)
+    kernelFillPairs<<<gridDim1, blockDim1>>>(
+        numCircles, cudaDevicePosition, cudaDeviceRadius,
+        gridDimX, gridDimY, 1.f / gridDimX, 1.f / gridDimY,
+        thrust::raw_pointer_cast(d_write_offsets.data()),
+        d_cell_keys_temp,           // Temporary keys
+        d_cell_circle_indices);     // Circle indices (values for sort)
+    cudaCheckError(cudaGetLastError());
+
+    // Thrust Sort: Sort circle indices by cell key (stable to preserve order)
+    thrust::stable_sort_by_key(thrust::device,
+                              d_cell_keys_temp, d_cell_keys_temp + total_pairs, // Keys
+                              d_cell_circle_indices);                          // Values
+    cudaCheckError(cudaGetLastError());
+
+
+    // Thrust Reduce/Scan: Find unique keys, counts, and start indices
+    thrust::device_vector<int> d_unique_keys(totalGridCells); // Max possible unique keys
+    thrust::device_vector<int> d_run_counts(totalGridCells);
+    thrust::device_vector<int> d_run_starts(totalGridCells);
+
+    // Use reduce_by_key to find unique keys and their counts
+    auto end_unique = thrust::reduce_by_key(
+        thrust::device,
+        d_cell_keys_temp, d_cell_keys_temp + total_pairs, // Input keys
+        thrust::make_constant_iterator(1),                // Input values (just 1 for counting)
+        d_unique_keys.begin(),                            // Output keys (unique cell IDs)
+        d_run_counts.begin());                            // Output values (counts per cell ID)
+    cudaCheckError(cudaGetLastError());
+
+    int num_unique_keys = end_unique.first - d_unique_keys.begin();
+
+    // Scan the counts to get the start indices
+    thrust::exclusive_scan(thrust::device, d_run_counts.begin(), d_run_counts.begin() + num_unique_keys, d_run_starts.begin());
+    cudaCheckError(cudaGetLastError());
+
+    // Kernel 3: Fill dense lookup tables (-1/0 for empty cells)
+    cudaCheckError(cudaMemset(d_dense_cell_pointers, -1, totalGridCells * sizeof(int)));
+    cudaCheckError(cudaMemset(d_dense_cell_counts, 0, totalGridCells * sizeof(int)));
+
+    if (num_unique_keys > 0) {
+        dim3 blockDim3(256);
+        dim3 gridDim3((num_unique_keys + blockDim3.x - 1) / blockDim3.x);
+        kernelFillDensePointers<<<gridDim3, blockDim3>>>(
+            num_unique_keys,
+            thrust::raw_pointer_cast(d_unique_keys.data()),
+            thrust::raw_pointer_cast(d_run_starts.data()),
+            thrust::raw_pointer_cast(d_run_counts.data()),
+            d_dense_cell_pointers,
+            d_dense_cell_counts);
+        cudaCheckError(cudaGetLastError());
+    }
+
+    // Update constant memory with pointers to the newly built/filled data
+    GlobalConstants params;
+    cudaCheckError(cudaMemcpyFromSymbol(&params, cuConstRendererParams, sizeof(GlobalConstants)));
+    params.cellCircleIndices = d_cell_circle_indices; // The sorted list
+    params.cellPointers = d_dense_cell_pointers;      // Dense pointer lookup
+    params.cellCounts = d_dense_cell_counts;          // Dense count lookup
+    cudaCheckError(cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants)));
+}
+
+
+void CudaRenderer::render() {
+    // Build the spatial grid structure (runs every frame)
+    buildSpatialGrid();
+
+    // Launch the binned rendering kernel
+    dim3 blockDim(16, 16); // 256 threads per block
+    dim3 gridDim(
+        (image->width + blockDim.x - 1) / blockDim.x,
+        (image->height + blockDim.y - 1) / blockDim.y);
+
+    kernelRenderCirclesBinned<<<gridDim, blockDim>>>();
+    cudaCheckError(cudaGetLastError());
+
+    // Synchronize after rendering
+    cudaCheckError(cudaDeviceSynchronize());
+}
+```
+
+**cudaRenderer.h Modification:** Add the new member variables required for binning inside the `CudaRenderer` class definition:
+
+```cpp
+#ifndef __CUDA_RENDERER_H__
+#define __CUDA_RENDERER_H__
+
+// ... (includes and defines) ...
+
+class CudaRenderer : public CircleRenderer {
+
+private:
+
+    Image* image;
+    SceneName sceneName;
+
+    int numCircles;
+    float* position;
+    float* velocity;
+    float* color;
+    float* radius;
+
+    float* cudaDevicePosition;
+    float* cudaDeviceVelocity;
+    float* cudaDeviceColor;
+    float* cudaDeviceRadius;
+    float* cudaDeviceImageData;
+
+    // --- New members for Binning ---
+    int gridDimX;
+    int gridDimY;
+    int totalGridCells;
+
+    // Device pointers for binning structure (contents built each frame)
+    int* d_cell_circle_indices; // Flattened list of circle indices, sorted by cell, stable
+    int* d_dense_cell_pointers; // Dense array [cell_id] -> start index in d_cell_circle_indices (-1 if empty)
+    int* d_dense_cell_counts;   // Dense array [cell_id] -> count of circles in cell
+
+    // Temporary device storage for preprocessing (reused across frames)
+    int* d_cell_keys_temp;      // Temporary storage for cell keys during sorting
+    size_t currentPairCapacity; // Tracks allocated size for d_cell_circle_indices & d_cell_keys_temp
+
+    // Helper function for preprocessing
+    void buildSpatialGrid();
+    // --- End Binning Members ---
+
+
+public:
+
+    CudaRenderer();
+    virtual ~CudaRenderer();
+
+    // ... (rest of public methods are unchanged) ...
+    const Image* getImage();
+    void setup();
+    void loadScene(SceneName name);
+    void allocOutputImage(int width, int height);
+    void clearImage();
+    void advanceAnimation();
+    void render();
+
+    // shadePixel is no longer used directly
+    /*
+    void shadePixel(
+        int circleIndex,
+        float pixelCenterX, float pixelCenterY,
+        float px, float py, float pz,
+        float* pixelData);
+    */
+};
+
+
+#endif // __CUDA_RENDERER_H__
+```
