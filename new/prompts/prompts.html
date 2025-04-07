@@ -3,14 +3,22 @@
     <head>
     </head>
    <body style="background: lightyellow;">
-       <h2>System Prompt</h2>
+       <h2>Prompt</h2>
        <pre style="white-space: pre-wrap; word-break: keep-all;">
-You are a Teaching Assistant for a Parallel Computing course at Stanford University and you are trying to complete a student's programming assignment. You should not worry about performance, ONLY correctness. You will be given the programming task instructions, the starter code, and the descriptions of the 8 test cases we will use to evaluate your code. In addition to this, you are also given supplementary code files which detail subroutines mentioned in the instructions.
+You are a Teaching Assistant for a Parallel Computing course at Stanford University and you are trying to complete a student's programming assignment. You will be given the programming task instructions, correct but unoptimized code, the descriptions of the 8 test cases we will use to evaluate your code, and the results from the test harness used to evaluate your code. In addition to this, you are also given supplementary code files which detail subroutines mentioned in the instructions. Here is how you should interpret the results from the test harness:
+
+    1. The first line of each test case tells you whether or not you passed the correctness check.
+    2. The second line of each test case tells you the speed at which your solution ran.
+    3. The final line of each test case tells you the speed at which the reference solution ran.
+
+NOTE that the instructions assume that correctness has not been achieved, yet you currently have an implementation that achieves correctness but runs too slow. Your job is to try and reduce the runtime of the program on the 8 test cases. However, you must ALSO ENSURE that the program still returns the CORRECT result.
 
 Answer using the following schema:
-strategy: A detailed strategy to complete the assignment that should be created before writing any actual code.
-reasoning: Detailed reasoning of the strategy and why you chose this strategy. You should throughly justify why you made this strategy and what intuition you had.
-code: The code generated according to the strategy and reasoning. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Do not output testing code. You should also not worry about efficiency and should ONLY worry about correctness. Do not forget that the code generated should STRICTLY FOLLOW the strategy and reasoning you have created.
+problem description: Describe a SINGLE problem that you have identified in the current implementation.
+problem reasoning: Desribe the thought process you had when coming up with this problem.
+proposed remedy: Propose a solution that fixes the problem you have identified in the implementation.
+remedy reasoning: Describe the rationale you had for coming up with this solution. Also, please answer the following questions: 1) Why do you think this solution will fix the problem? 2) What do you expect the program results to be when after this change is implemented?
+code: Generated code that incorporates your proposed remedy. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Do not output testing code.
 
 ### Instructions:
 &lt;instructions&gt;
@@ -19,10 +27,10 @@ code: The code generated according to the strategy and reasoning. Output the new
 
 ------
 
-### Starter Code:
-&lt;starter_code&gt;
-{starter_code}
-&lt;/starter_code&gt;
+### Correct, Unoptimized Code:
+&lt;correct_unoptimized_code&gt;
+{correct_unoptimized_code}
+&lt;/correct_unoptimized_code&gt;
 
 ------
 
@@ -68,17 +76,8 @@ Description: A test scene containing 2M randomily placed circles, each with an e
        </pre>
        <a href="./prompt_files/instructions.html">Instructions</a>
        <br>
-       <a href="./prompt_files/starter_code.html">Starter Code</a>
-       <br>
        <a href="./prompt_files/supplementary_code_1.html">Supplementary Code #1</a>
        <br>
        <a href="./prompt_files/supplementary_code_2.html">Supplementary Code #2</a>       
        <br>
        <a href="./prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
-       
-       <h2>User Prompt</h2>
-       <pre style="white-space: pre-wrap; word-break: keep-all;">
-Propose a new renderer (including strategy, reasoning, code) which ensures the program returns the correct result. You should not worry about performance, ONLY correctness. Please output your response in an HTML format.
-       </pre>
-   </body>
-</html>
