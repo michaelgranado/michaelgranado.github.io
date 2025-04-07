@@ -1,18 +1,3 @@
-```html
-<!DOCTYPE html>
-<html>
-<head>
-<title>CUDA Renderer Optimization</title>
-<style>
-body { font-family: sans-serif; }
-pre { background-color: #f4f4f4; border: 1px solid #ddd; padding: 10px; border-radius: 5px; }
-code { font-family: monospace; }
-.problem-section { margin-bottom: 20px; }
-h3 { color: #007bff; }
-</style>
-</head>
-<body>
-
 <div class="problem-section">
 <h3>problem description:</h3>
 <p>The current rendering kernel, <code>kernelRenderCirclesTiled</code>, assigns each thread to a pixel and iterates through all circles for that pixel. While it uses a conservative tile-based culling check (<code>circleInBoxConservative</code>) to potentially skip processing circles that don't overlap the entire thread block's tile, each thread within the block still independently reads the position and radius data for every non-culled circle from global memory. For scenes with a large number of circles, this results in massive redundant global memory reads, as multiple threads within the same block repeatedly fetch the same circle data. Global memory access is slow, making this a significant performance bottleneck.</p>
@@ -52,7 +37,7 @@ h3 { color: #007bff; }
 
 <div class="problem-section">
 <h3>code:</h3>
-<pre><code class="language-cpp">
+```cpp
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -785,10 +770,5 @@ CudaRenderer::render() {
 
 // Definition for shadePixel (already included above the kernels)
 // void CudaRenderer::shadePixel(...) { /* Host-side version not needed/used */ }
-
-</code></pre>
-</div>
-
-</body>
-</html>
 ```
+</div>

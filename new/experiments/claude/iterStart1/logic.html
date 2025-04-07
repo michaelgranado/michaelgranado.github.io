@@ -1,59 +1,44 @@
 <body style="background: lightyellow;">
+<div class="problem-section">
+<h3>problem description:</h3>
+<p>The current rendering kernel, <code>kernelRenderCirclesTiled</code>, assigns each thread to a pixel and iterates through all circles for that pixel. While it uses a conservative tile-based culling check (<code>circleInBoxConservative</code>) to potentially skip processing circles that don't overlap the entire thread block's tile, each thread within the block still independently reads the position and radius data for every non-culled circle from global memory. For scenes with a large number of circles, this results in massive redundant global memory reads, as multiple threads within the same block repeatedly fetch the same circle data. Global memory access is slow, making this a significant performance bottleneck.</p>
+</div>
+
+<div class="problem-section">
+<h3>problem reasoning:</h3>
+<p>I analyzed the <code>kernelRenderCirclesTiled</code> kernel. The outer loop iterates from <code>circleIndex = 0</code> to <code>numCircles</code>. Inside this loop, each thread reads circle position (<code>cuConstRendererParams.position[3 * circleIndex]</code>) and radius (<code>cuConstRendererParams.radius[circleIndex]</code>) from global memory. Although the <code>circleInBoxConservative</code> check helps prune circles at the tile level, all threads within a block that pass this check will perform these global memory reads for the same circle. Since threads in a block execute on the same Streaming Multiprocessor (SM) and often access memory similarly, there's a high degree of redundant traffic to the slow global memory. Accessing shared memory is significantly faster than global memory. By caching frequently accessed circle data (position and radius) in shared memory, we can reduce the number of global memory transactions dramatically, replacing many slow global reads with fewer global reads followed by many fast shared memory reads.</p>
+</div>
+
+<div class="problem-section">
+<h3>proposed remedy:</h3>
+<p>Implement a new kernel, <code>kernelRenderCirclesTiledShared</code>, that utilizes shared memory to cache circle data (position and radius) for processing within a thread block.
+<ol>
+    <li>Maintain the tile-based approach where each thread block processes a tile of pixels (e.g., 16x16) and each thread is responsible for one pixel.</li>
+    <li>Introduce shared memory arrays within the kernel to store a chunk of circle positions and radii. The size of the chunk can be equal to the number of threads in the block (e.g., 256).</li>
+    <li>Modify the main loop to iterate through circles in chunks.</li>
+    <li>Inside the chunk loop, have threads within the block cooperatively load the position and radius data for the current chunk of circles from global memory into the shared memory arrays. Use <code>__syncthreads()</code> to ensure loading is complete before proceeding.</li>
+    <li>After loading, each thread iterates through the circles currently cached in shared memory.</li>
+    <li>For each circle in shared memory, perform the <code>circleInBoxConservative</code> test using the cached data and the tile boundaries.</li>
+    <li>If the test passes, call a slightly modified <code>shadePixel</code> function, passing the circle's position and radius directly from shared memory (instead of having <code>shadePixel</code> read them from global memory). The global <code>circleIndex</code> is still needed for color lookup.</li>
+    <li>Use <code>__syncthreads()</code> again before loading the next chunk to avoid race conditions on the shared memory arrays.</li>
+    <li>Modify the <code>shadePixel</code> function signature to accept position and radius as parameters.</li>
+    <li>Update <code>CudaRenderer::render</code> to launch this new <code>kernelRenderCirclesTiledShared</code> kernel.</li>
+</ol>
+</p>
+</div>
+
+<div class="problem-section">
+<h3>remedy reasoning:</h3>
+<p>1) Why do you think this solution will fix the problem?</p>
+<p>This solution directly addresses the identified bottleneck: redundant global memory reads of circle data. By loading chunks of circle data into shared memory once per block per chunk, we replace potentially `numCircles * threads_per_block` global reads of position/radius with approximately `numCircles` global reads (coalesced across threads during loading) plus `numCircles * threads_per_block` fast shared memory reads. Since shared memory latency is orders of magnitude lower than global memory latency, and bandwidth is much higher, this significantly reduces the time spent waiting for data, improving overall kernel execution time, especially for scenes with many circles where memory bandwidth is often the limiting factor.</p>
+
+<p>2) What do you expect the program results to be when after this change is implemented?</p>
+<p>I expect the program to remain correct, passing all correctness checks, because the fundamental rendering logic (processing circles in order, accumulating color per pixel) is preserved. The order of operations for blending within a pixel remains unchanged. Atomicity is still guaranteed as each thread writes only to its own pixel at the very end. In terms of performance, I expect a significant speedup across most test cases, particularly those with a large number of circles (`rand10k`, `rand100k`, `pattern`, `snowsingle`, `biglittle`, `rand1M`, `micro2M`). The improvement will stem directly from the reduced global memory traffic. For the `rgb` test case with only 3 circles, the overhead of setting up shared memory might slightly increase the runtime compared to the previous version, or the difference might be negligible, but it should still be very fast. The goal is substantial improvement on the larger, more demanding test cases, bringing the runtime closer to the reference solution.</p>
+</div>
+
+<div class="problem-section">
+<h3>code:</h3>
 <pre>
-&lt;!DOCTYPE html&gt;
-&lt;html&gt;
-&lt;head&gt;
-&lt;title&gt;CUDA Renderer Optimization&lt;/title&gt;
-&lt;style&gt;
-body { font-family: sans-serif; }
-pre { background-color: #f4f4f4; border: 1px solid #ddd; padding: 10px; border-radius: 5px; }
-code { font-family: monospace; }
-.problem-section { margin-bottom: 20px; }
-h3 { color: #007bff; }
-&lt;/style&gt;
-&lt;/head&gt;
-&lt;body&gt;
-
-&lt;div class="problem-section"&gt;
-&lt;h3&gt;problem description:&lt;/h3&gt;
-&lt;p&gt;The current rendering kernel, &lt;code&gt;kernelRenderCirclesTiled&lt;/code&gt;, assigns each thread to a pixel and iterates through all circles for that pixel. While it uses a conservative tile-based culling check (&lt;code&gt;circleInBoxConservative&lt;/code&gt;) to potentially skip processing circles that don't overlap the entire thread block's tile, each thread within the block still independently reads the position and radius data for every non-culled circle from global memory. For scenes with a large number of circles, this results in massive redundant global memory reads, as multiple threads within the same block repeatedly fetch the same circle data. Global memory access is slow, making this a significant performance bottleneck.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class="problem-section"&gt;
-&lt;h3&gt;problem reasoning:&lt;/h3&gt;
-&lt;p&gt;I analyzed the &lt;code&gt;kernelRenderCirclesTiled&lt;/code&gt; kernel. The outer loop iterates from &lt;code&gt;circleIndex = 0&lt;/code&gt; to &lt;code&gt;numCircles&lt;/code&gt;. Inside this loop, each thread reads circle position (&lt;code&gt;cuConstRendererParams.position[3 * circleIndex]&lt;/code&gt;) and radius (&lt;code&gt;cuConstRendererParams.radius[circleIndex]&lt;/code&gt;) from global memory. Although the &lt;code&gt;circleInBoxConservative&lt;/code&gt; check helps prune circles at the tile level, all threads within a block that pass this check will perform these global memory reads for the same circle. Since threads in a block execute on the same Streaming Multiprocessor (SM) and often access memory similarly, there's a high degree of redundant traffic to the slow global memory. Accessing shared memory is significantly faster than global memory. By caching frequently accessed circle data (position and radius) in shared memory, we can reduce the number of global memory transactions dramatically, replacing many slow global reads with fewer global reads followed by many fast shared memory reads.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class="problem-section"&gt;
-&lt;h3&gt;proposed remedy:&lt;/h3&gt;
-&lt;p&gt;Implement a new kernel, &lt;code&gt;kernelRenderCirclesTiledShared&lt;/code&gt;, that utilizes shared memory to cache circle data (position and radius) for processing within a thread block.
-&lt;ol&gt;
-    &lt;li&gt;Maintain the tile-based approach where each thread block processes a tile of pixels (e.g., 16x16) and each thread is responsible for one pixel.&lt;/li&gt;
-    &lt;li&gt;Introduce shared memory arrays within the kernel to store a chunk of circle positions and radii. The size of the chunk can be equal to the number of threads in the block (e.g., 256).&lt;/li&gt;
-    &lt;li&gt;Modify the main loop to iterate through circles in chunks.&lt;/li&gt;
-    &lt;li&gt;Inside the chunk loop, have threads within the block cooperatively load the position and radius data for the current chunk of circles from global memory into the shared memory arrays. Use &lt;code&gt;__syncthreads()&lt;/code&gt; to ensure loading is complete before proceeding.&lt;/li&gt;
-    &lt;li&gt;After loading, each thread iterates through the circles currently cached in shared memory.&lt;/li&gt;
-    &lt;li&gt;For each circle in shared memory, perform the &lt;code&gt;circleInBoxConservative&lt;/code&gt; test using the cached data and the tile boundaries.&lt;/li&gt;
-    &lt;li&gt;If the test passes, call a slightly modified &lt;code&gt;shadePixel&lt;/code&gt; function, passing the circle's position and radius directly from shared memory (instead of having &lt;code&gt;shadePixel&lt;/code&gt; read them from global memory). The global &lt;code&gt;circleIndex&lt;/code&gt; is still needed for color lookup.&lt;/li&gt;
-    &lt;li&gt;Use &lt;code&gt;__syncthreads()&lt;/code&gt; again before loading the next chunk to avoid race conditions on the shared memory arrays.&lt;/li&gt;
-    &lt;li&gt;Modify the &lt;code&gt;shadePixel&lt;/code&gt; function signature to accept position and radius as parameters.&lt;/li&gt;
-    &lt;li&gt;Update &lt;code&gt;CudaRenderer::render&lt;/code&gt; to launch this new &lt;code&gt;kernelRenderCirclesTiledShared&lt;/code&gt; kernel.&lt;/li&gt;
-&lt;/ol&gt;
-&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class="problem-section"&gt;
-&lt;h3&gt;remedy reasoning:&lt;/h3&gt;
-&lt;p&gt;1) Why do you think this solution will fix the problem?&lt;/p&gt;
-&lt;p&gt;This solution directly addresses the identified bottleneck: redundant global memory reads of circle data. By loading chunks of circle data into shared memory once per block per chunk, we replace potentially `numCircles * threads_per_block` global reads of position/radius with approximately `numCircles` global reads (coalesced across threads during loading) plus `numCircles * threads_per_block` fast shared memory reads. Since shared memory latency is orders of magnitude lower than global memory latency, and bandwidth is much higher, this significantly reduces the time spent waiting for data, improving overall kernel execution time, especially for scenes with many circles where memory bandwidth is often the limiting factor.&lt;/p&gt;
-
-&lt;p&gt;2) What do you expect the program results to be when after this change is implemented?&lt;/p&gt;
-&lt;p&gt;I expect the program to remain correct, passing all correctness checks, because the fundamental rendering logic (processing circles in order, accumulating color per pixel) is preserved. The order of operations for blending within a pixel remains unchanged. Atomicity is still guaranteed as each thread writes only to its own pixel at the very end. In terms of performance, I expect a significant speedup across most test cases, particularly those with a large number of circles (`rand10k`, `rand100k`, `pattern`, `snowsingle`, `biglittle`, `rand1M`, `micro2M`). The improvement will stem directly from the reduced global memory traffic. For the `rgb` test case with only 3 circles, the overhead of setting up shared memory might slightly increase the runtime compared to the previous version, or the difference might be negligible, but it should still be very fast. The goal is substantial improvement on the larger, more demanding test cases, bringing the runtime closer to the reference solution.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class="problem-section"&gt;
-&lt;h3&gt;code:&lt;/h3&gt;
-&lt;pre&gt;&lt;code class="language-cpp"&gt;
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -786,11 +771,6 @@ CudaRenderer::render() {
 
 // Definition for shadePixel (already included above the kernels)
 // void CudaRenderer::shadePixel(...) { /* Host-side version not needed/used */ }
-
-&lt;/code&gt;&lt;/pre&gt;
-&lt;/div&gt;
-
-&lt;/body&gt;
-&lt;/html&gt;
 </pre>
+</div>
 </body>
