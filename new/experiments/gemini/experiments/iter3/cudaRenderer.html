@@ -1,101 +1,10 @@
-<body style="background: lightyellow;">
-<pre>
-// kernelRenderCirclesTiled -- (CUDA device code)
-//
-// Each thread renders a single pixel.
-// Uses tile-based culling to skip circles far from the pixel's tile.
-// Processes remaining relevant circles in order for the pixel.
-// Accumulates color locally in registers and writes once to global memory.
-__global__ void kernelRenderCirclesTiled() {
-    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
-    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
-
-    int imageWidth = cuConstRendererParams.imageWidth;
-    int imageHeight = cuConstRendererParams.imageHeight;
-
-    // Check if this thread's pixel is within the image bounds
-    if (pixelX &gt;= imageWidth || pixelY &gt;= imageHeight)
-        return;
-
-    float invWidth = 1.f / imageWidth;
-    float invHeight = 1.f / imageHeight;
-
-    // Calculate normalized coordinates for the pixel center
-    float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
-                                         invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
-
-    // Calculate the normalized boundaries of this thread's tile (block)
-    float tileL = invWidth * (blockIdx.x * blockDim.x);
-    float tileR = invWidth * ((blockIdx.x + 1) * blockDim.x);
-    float tileB = invHeight * (blockIdx.y * blockDim.y);
-    float tileT = invHeight * ((blockIdx.y + 1) * blockDim.y);
-
-    // Get a pointer to this pixel's color data in global memory
-    int pixelOffset = 4 * (pixelY * imageWidth + pixelX);
-    float4* imgPtrGlobal = (float4*)(&cuConstRendererParams.imageData[pixelOffset]);
-
-    // Initialize accumulated color locally (in registers)
-    // Read the initial background color for this pixel (set by clearImage)
-    float4 accumulatedColor = *imgPtrGlobal;
-
-    // Process all circles in order
-    for (int circleIndex = 0; circleIndex &lt; cuConstRendererParams.numCircles; circleIndex++) {
-        int index3 = 3 * circleIndex;
-
-        // Read circle position and radius
-        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-        float rad = cuConstRendererParams.radius[circleIndex];
-
-        // *** Tile Culling Check ***
-        // Use conservative test: if circle doesn't overlap the tile's bounding box, skip it
-        if (circleInBoxConservative(p.x, p.y, rad, tileL, tileR, tileT, tileB)) {
-		shadePixel(circleIndex, pixelCenterNorm, p, accumulatedColor);
-        } // End of tile culling check
-    } // End loop over circles
-
-    // Write the final accumulated color to global memory ONCE
-    *imgPtrGlobal = accumulatedColor;
-}
-</pre>
-
-<section id="code-description">
-  <p>
-  The code snippet above is what we consider to be the naive solution to CS149 Assignment 3. Although it maintains correctness by preserving the
-  </p>
-</section>
-
-<section id="remedy-reasoning">
-  <h2>remedy reasoning:</h2>
-  <p>
-    The previous correct implementation (`kernelRenderCirclesTiled`) had each pixel thread iterate through all `numCircles`, performing a tile culling check and memory reads for every circle. This was inefficient because a given tile is usually intersected by only a small fraction of the total circles, especially in scenes with many circles spread across the image. The proposed remedy addresses this directly.
-  </p>
-  <ol>
-    <li>
-      <strong>Why do you think this solution will fix the problem?</strong>
-      <br>
-      This solution fixes the performance bottleneck by replacing the O(N<sub>pixels</sub> * N<sub>circles</sub>) complexity of the core loop checks with a two-stage process:
-      <ul>
-          <li>Stage 1 (List Building): O(N<sub>tiles</sub> * (N<sub>circles</sub> / ThreadsPerBlock) * Cost<sub>scan</sub>) - The block collaboratively checks all circles once. The cost per circle involves a memory read, a box test, and a shared memory scan operation.</li>
-          <li>Stage 2 (Pixel Shading): O(N<sub>pixels</sub> * N<sub>circles_intersecting_tile</sub>) - Each pixel iterates only over the relevant circles found in Stage 1.</li>
-      </ul>
-      Since N<sub>circles_intersecting_tile</sub> is often much smaller than N<sub>circles</sub>, the overall computation is significantly reduced. By storing the intersecting circle list in shared memory, Stage 2 benefits from faster memory access compared to repeated global memory reads. The use of prefix sum ensures the list is constructed correctly ordered without complex locking or sorting.
-    </li>
-    <li>
-      <strong>What do you expect the program results to be when after this change is implemented?</strong>
-      <br>
-      The program results (output images) should be <strong>identical</strong> to the previous correct implementation and the CPU reference renderer. This is because the core logic remains the same:
-      <ul>
-          <li><strong>Order:</strong> The prefix sum method used to build the shared memory list explicitly preserves the original relative order of intersecting circles. Pixels process circles from this ordered list, satisfying the blending order requirement.</li>
-          <li><strong>Atomicity:</strong> Each pixel thread still accumulates color locally in registers and performs only a single, final write to its corresponding pixel location in global memory. This avoids race conditions between threads writing to the same pixel.</li>
-      </ul>
-      Therefore, correctness is maintained. Performance, however, is expected to improve significantly, especially on scenes with a large number of circles (`rand10k`, `rand100k`, `rand1M`, `micro2M`), as the redundant checks are eliminated. The performance gain might be less pronounced on scenes where circles are very dense and overlap significantly across many tiles.
-    </li>
-  </ol>
-</section>
-
-<section id="code">
-  <h2>code:</h2>
-<pre>
+<!DOCTYPE html>
+<html>
+    <head>
+        <link rel="stylesheet" href="/styles.css">
+    </head>
+    <body>
+        <pre>
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -885,17 +794,6 @@ CudaRenderer::render() {
     // Synchronize after rendering to ensure completion before potential image copy to host
     cudaCheckError(cudaDeviceSynchronize());
 }
-
-// shadePixel method (part of CudaRenderer class) is not used by the CUDA kernel directly.
-// The __device__ shadePixel function is used instead.
-void CudaRenderer::shadePixel(
-        int circleIndex,
-        float pixelCenterX, float pixelCenterY,
-        float px, float py, float pz,
-        float* pixelData) {
-    // This host-side method is likely unused in the CUDA path
-    // and was part of the reference implementation structure.
-    // No action needed here for the CUDA implementation.
-    return;
-}
-</body>
+       </pre>
+    </body>
+</html>
