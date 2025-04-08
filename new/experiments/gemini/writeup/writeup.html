@@ -1,6 +1,15 @@
 <body style="background: lightyellow;">
-<h1>CUDA Renderer Optimization: Tile-Based Culling with Shared Memory</h1>
+<h1>CS149 Agent Case Study</h1>
 
+<section id="cs149-student-mindset">
+  <h2>The Mindset of a CS149 Student</h2>
+  <p>
+  The CS149 typically employs the following workflow:
+  </p>
+  <ol>
+    <li><strong>Collaborative Tile Culling:</strong> Within each thread block (representing an image tile), threads collaboratively identify the subset of circles that potentially intersect the tile's bounding box.</li>
+  </ol>
+</section>
 <pre>
 // kernelRenderCirclesTiled -- (CUDA device code)
 //
@@ -16,15 +25,15 @@ __global__ void kernelRenderCirclesTiled() {
     int imageHeight = cuConstRendererParams.imageHeight;
 
     // Check if this thread's pixel is within the image bounds
-    if (pixelX >= imageWidth || pixelY >= imageHeight)
+    if (pixelX &gt;= imageWidth || pixelY &gt;= imageHeight)
         return;
 
     float invWidth = 1.f / imageWidth;
     float invHeight = 1.f / imageHeight;
 
     // Calculate normalized coordinates for the pixel center
-    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                         invHeight * (static_cast<float>(pixelY) + 0.5f));
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
+                                         invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
 
     // Calculate the normalized boundaries of this thread's tile (block)
     float tileL = invWidth * (blockIdx.x * blockDim.x);
@@ -41,7 +50,7 @@ __global__ void kernelRenderCirclesTiled() {
     float4 accumulatedColor = *imgPtrGlobal;
 
     // Process all circles in order
-    for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
+    for (int circleIndex = 0; circleIndex &lt; cuConstRendererParams.numCircles; circleIndex++) {
         int index3 = 3 * circleIndex;
 
         // Read circle position and radius
