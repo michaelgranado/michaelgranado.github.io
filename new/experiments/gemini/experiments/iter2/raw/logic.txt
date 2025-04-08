@@ -1,3 +1,16 @@
+```html
+<!DOCTYPE html>
+<html>
+<head>
+<title>CUDA Renderer Optimization: Tile-Based Culling with Shared Memory</title>
+<style>
+body { font-family: sans-serif; }
+pre { background-color: #f4f4f4; border: 1px solid #ddd; padding: 10px; border-radius: 5px; }
+code { font-family: monospace; }
+</style>
+</head>
+<body>
+
 <h1>CUDA Renderer Optimization: Tile-Based Culling with Shared Memory</h1>
 
 <section id="proposed-remedy">
@@ -47,7 +60,7 @@
 
 <section id="code">
   <h2>code:</h2>
-```cpp
+  <pre><code class="language-cuda">
 #include &lt;string&gt;
 #include &lt;algorithm&gt;
 #include &lt;math.h&gt;
@@ -850,3 +863,11 @@ void CudaRenderer::shadePixel(
     // No action needed here for the CUDA implementation.
     return;
 }
+
+
+  </code></pre>
+</section>
+
+</body>
+</html>
+```
