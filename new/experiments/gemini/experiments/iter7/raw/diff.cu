@@ -1,74 +1,134 @@
-1a2,3
+2,8c2,3
+<     __shared__ int tileIntersectingIndices[MAX_CIRCLES_PER_TILE];
+<     __shared__ unsigned int isIntersecting[SCAN_BLOCK_DIM];
+<     __shared__ unsigned int scanOutput[SCAN_BLOCK_DIM];
+<     __shared__ unsigned int scanScratch[2 * SCAN_BLOCK_DIM];
+<     __shared__ int currentTileListSize;
+<     __shared__ int chunkIntersectCountShared;
+<     __shared__ int chunkBaseOffsetShared;
+---
 >     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
 >     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
-3,9d4
-<     __shared__ float3 s_positions[BLOCK_SIZE];
-<     __shared__ float  s_radii[BLOCK_SIZE];
-<     __shared__ float3 s_colors[BLOCK_SIZE];
+10,16d4
+<     int linearThreadIdx = threadIdx.y * blockDim.x + threadIdx.x;
 < 
-<     int pixelX = blockIdx.x * TILE_SIZE_X + threadIdx.x;
-<     int pixelY = blockIdx.y * TILE_SIZE_Y + threadIdx.y;
+<     if (linearThreadIdx == 0) {
+<         currentTileListSize = 0;
+<     }
+<     __syncthreads();
 < 
-16,17d10
-<     int tid = threadIdx.y * TILE_SIZE_X + threadIdx.x;
-< 
-19a13
+18a7,10
 > 
-23,26c17,20
-<     float tileL = invWidth * (blockIdx.x * TILE_SIZE_X);
-<     float tileR = invWidth * ((blockIdx.x + 1) * TILE_SIZE_X);
-<     float tileB = invHeight * (blockIdx.y * TILE_SIZE_Y);
-<     float tileT = invHeight * ((blockIdx.y + 1) * TILE_SIZE_Y);
+>     if (pixelX >= imageWidth || pixelY >= imageHeight)
+>         return;
+> 
+22,25c14,15
+<     float tileL = invWidth * (blockIdx.x * RENDER_BLOCK_DIM_X);
+<     float tileR = invWidth * ((blockIdx.x + 1) * RENDER_BLOCK_DIM_X);
+<     float tileB = invHeight * (blockIdx.y * RENDER_BLOCK_DIM_Y);
+<     float tileT = invHeight * ((blockIdx.y + 1) * RENDER_BLOCK_DIM_Y);
+---
+>     float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+>                                          invHeight * (static_cast<float>(pixelY) + 0.5f));
+27c17,20
+<     int totalCircles = cuConstRendererParams.numCircles;
 ---
 >     float tileL = invWidth * (blockIdx.x * blockDim.x);
 >     float tileR = invWidth * ((blockIdx.x + 1) * blockDim.x);
 >     float tileB = invHeight * (blockIdx.y * blockDim.y);
 >     float tileT = invHeight * ((blockIdx.y + 1) * blockDim.y);
-33,34c27,28
-<     bool loadSharedColor = (cuConstRendererParams.sceneName != SNOWFLAKES &&
-<                             cuConstRendererParams.sceneName != SNOWFLAKES_SINGLE_FRAME);
+29c22,23
+<     for (int chunkBaseCircleIdx = 0; chunkBaseCircleIdx < totalCircles; chunkBaseCircleIdx += SCAN_BLOCK_DIM) {
+---
+>     int pixelOffset = 4 * (pixelY * imageWidth + pixelX);
+>     float4* imgPtrGlobal = (float4*)(&cuConstRendererParams.imageData[pixelOffset]);
+31,32c25
+<         int circleIdx = chunkBaseCircleIdx + linearThreadIdx;
+<         bool intersectsTile = false;
+---
+>     float4 accumulatedColor = *imgPtrGlobal;
+34,36c27,28
+<         if (circleIdx < totalCircles) {
+<             float3 p = *(float3*)(&cuConstRendererParams.position[3 * circleIdx]);
+<             float rad = cuConstRendererParams.radius[circleIdx];
 ---
 >     for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
 >         int index3 = 3 * circleIndex;
-36,37c30,31
-<     int numCircles = cuConstRendererParams.numCircles;
-<     for (int chunkBase = 0; chunkBase < numCircles; chunkBase += BLOCK_SIZE) {
+38,39c30,31
+<             intersectsTile = circleInBoxConservative(p.x, p.y, rad, tileL, tileR, tileT, tileB);
+<         }
 ---
 >         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
 >         float rad = cuConstRendererParams.radius[circleIndex];
-39,47c33,34
-<         int circleIdxGlobal = chunkBase + tid;
+41,50c33,34
+<         isIntersecting[linearThreadIdx] = intersectsTile ? 1 : 0;
 < 
-<         if (circleIdxGlobal < numCircles) {
-<             s_positions[tid] = *(float3*)&(cuConstRendererParams.position[3 * circleIdxGlobal]);
-<             s_radii[tid] = cuConstRendererParams.radius[circleIdxGlobal];
+<         __syncthreads();
 < 
-<             if (loadSharedColor) {
-<                 s_colors[tid] = *(float3*)&(cuConstRendererParams.color[3 * circleIdxGlobal]);
-<             }
+<         sharedMemExclusiveScan(linearThreadIdx, isIntersecting, scanOutput, scanScratch, SCAN_BLOCK_DIM);
+< 
+<         __syncthreads();
+< 
+<         if (linearThreadIdx == SCAN_BLOCK_DIM - 1) {
+<             chunkIntersectCountShared = scanOutput[SCAN_BLOCK_DIM - 1] + isIntersecting[SCAN_BLOCK_DIM - 1];
 ---
 >         if (circleInBoxConservative(p.x, p.y, rad, tileL, tileR, tileT, tileB)) {
 > 		shadePixel(circleIndex, pixelCenterNorm, p, accumulatedColor);
-48a36
+51a36
 >     } 
-50,69d37
+53,105c38
 <         __syncthreads();
 < 
-<         int numCirclesInChunk = min(BLOCK_SIZE, numCircles - chunkBase);
+<         if (chunkIntersectCountShared > 0) {
+<             if (linearThreadIdx == 0) {
+<                 chunkBaseOffsetShared = atomicAdd(¤tTileListSize, chunkIntersectCountShared);
+<             }
 < 
-<         for (int i = 0; i < numCirclesInChunk; ++i) {
-<             float3 p_shared = s_positions[i];
-<             float rad_shared = s_radii[i];
-<             float3 color_shared = loadSharedColor ? s_colors[i] : make_float3(0.f, 0.f, 0.f);
+<             __syncthreads();
 < 
-<             int currentCircleIdxGlobal = chunkBase + i;
+<             if (intersectsTile) {
+<                 int writeIdx = chunkBaseOffsetShared + scanOutput[linearThreadIdx];
 < 
-<             if (circleInBoxConservative(p_shared.x, p_shared.y, rad_shared, tileL, tileR, tileT, tileB)) {
-<                 shadePixelOptimized(currentCircleIdxGlobal, pixelCenterNorm, p_shared, rad_shared, color_shared, accumulatedColor);
+<                 if (writeIdx < MAX_CIRCLES_PER_TILE) {
+<                     tileIntersectingIndices[writeIdx] = circleIdx;
+<                 } else {
+<                     if (linearThreadIdx == 0 && chunkBaseOffsetShared + scanOutput[linearThreadIdx] == MAX_CIRCLES_PER_TILE) {
+<                          printf("Warning: MAX_CIRCLES_PER_TILE (%d) exceeded in block (%d, %d). Some circles may be missed.\n",
+<                                 MAX_CIRCLES_PER_TILE, blockIdx.x, blockIdx.y);
+<                     }
+<                 }
 <             }
 <         }
-< 
 <         __syncthreads();
-< 
 <     }
 < 
+<     int pixelX = blockIdx.x * RENDER_BLOCK_DIM_X + threadIdx.x;
+<     int pixelY = blockIdx.y * RENDER_BLOCK_DIM_Y + threadIdx.y;
+< 
+<     if (pixelX < imageWidth && pixelY < imageHeight) {
+< 
+<         float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+<                                              invHeight * (static_cast<float>(pixelY) + 0.5f));
+< 
+<         int pixelOffset = 4 * (pixelY * imageWidth + pixelX);
+<         float4* imgPtrGlobal = (float4*)(&cuConstRendererParams.imageData[pixelOffset]);
+< 
+<         float4 accumulatedColor = *imgPtrGlobal;
+< 
+<         int numCirclesInTile = currentTileListSize;
+<         if (numCirclesInTile > MAX_CIRCLES_PER_TILE) {
+<              numCirclesInTile = MAX_CIRCLES_PER_TILE;
+<         }
+< 
+<         for (int i = 0; i < numCirclesInTile; ++i) {
+<             int globalCircleIndex = tileIntersectingIndices[i];
+< 
+<             float3 p = *(float3*)(&cuConstRendererParams.position[3 * globalCircleIndex]);
+< 
+<             shadePixel(globalCircleIndex, pixelCenterNorm, p, accumulatedColor);
+<         }
+< 
+<         *imgPtrGlobal = accumulatedColor;
+<     }
+---
+>     *imgPtrGlobal = accumulatedColor;
