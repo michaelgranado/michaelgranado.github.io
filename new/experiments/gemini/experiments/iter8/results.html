@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <link rel="stylesheet" href="/styles.css">
+    </head>
+    <body>
+        <pre>
+2,3d1
+&lt;     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+&lt;     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+5,6c3
+&lt;     int imageWidth = cuConstRendererParams.imageWidth;
+&lt;     int imageHeight = cuConstRendererParams.imageHeight;
+---
+&gt;     int index = blockIdx.x * blockDim.x + threadIdx.x;
+8c5
+&lt;     if (pixelX &gt;= imageWidth || pixelY &gt;= imageHeight)
+---
+&gt;     if (index &gt;= cuConstRendererParams.numCircles)
+11,14c8
+&lt;     float invWidth = 1.f / imageWidth;
+&lt;     float invHeight = 1.f / imageHeight;
+&lt;     float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
+&lt;                                         invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
+---
+&gt;     int index3 = 3 * index;
+16c10,11
+&lt;     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+---
+&gt;     float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+&gt;     float  rad = cuConstRendererParams.radius[index];
+18,19c13,18
+&lt;     for (int circleIndex = 0; circleIndex &lt; cuConstRendererParams.numCircles; circleIndex++) {
+&lt;         int index3 = 3 * circleIndex;
+---
+&gt;     short imageWidth = cuConstRendererParams.imageWidth;
+&gt;     short imageHeight = cuConstRendererParams.imageHeight;
+&gt;     short minX = static_cast&lt;short&gt;(imageWidth * (p.x - rad));
+&gt;     short maxX = static_cast&lt;short&gt;(imageWidth * (p.x + rad)) + 1;
+&gt;     short minY = static_cast&lt;short&gt;(imageHeight * (p.y - rad));
+&gt;     short maxY = static_cast&lt;short&gt;(imageHeight * (p.y + rad)) + 1;
+21,22c20,23
+&lt;         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+&lt;         float rad = cuConstRendererParams.radius[circleIndex];
+---
+&gt;     short screenMinX = (minX &gt; 0) ? ((minX &lt; imageWidth) ? minX : imageWidth) : 0;
+&gt;     short screenMaxX = (maxX &gt; 0) ? ((maxX &lt; imageWidth) ? maxX : imageWidth) : 0;
+&gt;     short screenMinY = (minY &gt; 0) ? ((minY &lt; imageHeight) ? minY : imageHeight) : 0;
+&gt;     short screenMaxY = (maxY &gt; 0) ? ((maxY &lt; imageHeight) ? maxY : imageHeight) : 0;
+24,27c25,26
+&lt;         float diffX = p.x - pixelCenterNorm.x;
+&lt;         float diffY = p.y - pixelCenterNorm.y;
+&lt;         float pixelDist = diffX * diffX + diffY * diffY;
+&lt;         float maxDist = rad * rad;
+---
+&gt;     float invWidth = 1.f / imageWidth;
+&gt;     float invHeight = 1.f / imageHeight;
+29,30c28,34
+&lt;         if (pixelDist &lt;= maxDist) {
+&lt;             shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+---
+&gt;     for (int pixelY=screenMinY; pixelY&lt;screenMaxY; pixelY++) {
+&gt;         float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
+&gt;         for (int pixelX=screenMinX; pixelX&lt;screenMaxX; pixelX++) {
+&gt;             float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
+&gt;                                                  invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
+&gt;             shadePixel(index, pixelCenterNorm, p, imgPtr);
+&gt;             imgPtr++;
+       </pre>
+    </body>
+</html>
