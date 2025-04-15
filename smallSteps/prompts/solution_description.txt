@@ -1,0 +1,7 @@
+The solution modifies the kernelRenderCirclesTiled kernel and its launch configuration to address the performance bottleneck of iterating through all circles for every pixel. Instead of launching one thread per pixel within a tile (block), the optimized kernel is launched with one thread per tile (using dim3 blockDim(1, 1); in the render function). This single thread is responsible for processing all pixels within its assigned tile.
+
+The kernel iterates through the global list of circles in batches (CIRCLE_BATCH_SIZE). For each batch, the thread performs a tile-culling step: it checks each circle in the batch against the tile's bounding box using circleInBoxConservative. The indices of circles that potentially overlap the tile are stored temporarily in a shared memory array (tileCircleList).
+
+After identifying the relevant circles within a batch, the thread iterates through this smaller list (tileCircleList). For each relevant circle from the list, it then iterates through *all* pixels belonging to its assigned tile. Inside the pixel loops, it reads the pixel's current color from global memory, calls shadePixel to compute the blended color, and writes the updated color back to global memory. This process repeats for all batches of circles.
+
+This approach ensures that pixel shading computations and global memory writes only occur for circles that potentially overlap the tile, significantly reducing the workload compared to the original approach where every pixel thread checked every circle.

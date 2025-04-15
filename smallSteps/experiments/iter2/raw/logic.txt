@@ -1,20 +1,8 @@
-```html
-<!DOCTYPE html>
-<html>
-<head>
-<title>CUDA Renderer Optimization</title>
-<style>
-body { font-family: sans-serif; }
-pre { background-color: #f4f4f4; border: 1px solid #ddd; padding: 10px; white-space: pre-wrap; word-wrap: break-word; }
-code { font-family: monospace; }
-</style>
-</head>
-<body>
 <h1>CUDA Renderer Optimization</h1>
 <p>The following code implements the optimized CUDA renderer based on the provided solution description and reasoning. The primary change is in the <code>kernelRenderCirclesTiled</code> kernel and its launch configuration in the <code>render</code> method.</p>
 <p>Instead of launching one thread per pixel, we launch one thread per tile. This thread performs tile-based culling for batches of circles, storing potentially overlapping circle indices in shared memory. It then iterates through the pixels in its tile and applies the effects of the relevant circles sequentially, reading and writing the pixel color from global memory for each contributing circle to maintain correctness.</p>
 
-```cuda
+```cpp
 #include <string>
 #include <algorithm>
 #include <math.h>
@@ -762,8 +750,4 @@ void CudaRenderer::shadePixel(int circleIndex, float pixelCenterX, float pixelCe
 }
 
 
-```
-```html
-</body>
-</html>
 ```
