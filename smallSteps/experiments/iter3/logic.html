@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>TA Feedback: Assignment 3 Performance Issue</title>
+<style>
+  body { font-family: sans-serif; }
+  pre { background-color: #f4f4f4; padding: 1em; border-radius: 5px; }
+  strong { color: #00509e; }
+</style>
+</head>
+<body style="background: lightyellow;">
+  <h2>Assignment 3: Performance Analysis</h2>
+
+  <p><strong>Problem Description:</strong></p>
+  <p>
+    The primary performance bottleneck in the <code>kernelRenderCirclesTiled</code> kernel is that every pixel thread iterates through the <strong>entire list of circles</strong>. Although a conservative tile-based culling check (<code>circleInBoxConservative</code>) is performed, if a circle potentially overlaps the tile associated with a thread block, <i>all</i> threads within that block will still load the circle's data and perform the check, even if the circle ultimately does not cover their specific pixel. This leads to a massive amount of redundant computation, particularly in scenes with a large number of circles (e.g., rand100k, rand1M, micro2M), as the workload for each pixel thread scales linearly with the number of circles potentially overlapping its tile.
+  </p>
+
+  <p><strong>Problem Reasoning:</strong></p>
+  <p>
+    The provided code implements a "pixel-centric" approach where each thread is responsible for calculating the final color of a single pixel. The correctness requirement mandates processing circles in a specific order for blending.
+  </p>
+  <ol>
+    <li><strong>Initial Observation:</strong> The test harness results show that the code is correct but extremely slow compared to the reference, especially as the number of circles increases dramatically (e.g., rand10k is ~14x slower, rand100k is ~17x slower, rand1M is ~25x slower, micro2M is ~27x slower). This suggests the algorithm's complexity scales poorly with the number of circles (`N`).</li>
+    <li><strong>Code Analysis (<code>kernelRenderCirclesTiled</code>):</strong> I examined the main rendering kernel. The structure is:
+      <pre>
+for each pixel (assigned to a thread):
+  initialize pixel color
+  for circleIndex from 0 to numCircles-1:
+    load circle data (position, radius)
+    if circleInBoxConservative(circle, pixel's tile): // Tile culling
+      shadePixel(circle, pixel) // Precise check & blend
+  write final pixel color
+      </pre>
+    </li>
+    <li><strong>Identifying Redundancy:</strong> The core issue lies in the nested loop structure combined with the culling strategy.
+        <ul>
+            <li>The outer loop iterates over pixels (parallelized across threads).</li>
+            <li>The inner loop iterates over <em>all</em> circles.</li>
+            <li>The <code>circleInBoxConservative</code> check prunes circles that are entirely outside the block's tile boundary. However, if a circle overlaps even a small part of the tile, <em>every thread in that block</em> (e.g., 256 threads) executes the check for that circle.</li>
+            <li>Inside <code>shadePixel</code>, a precise point-in-circle test is done. For a circle that only covers a few pixels within the tile, most of the 256 threads that passed the conservative check will perform this precise test only to find the pixel is outside the circle, doing no useful blending work but still incurring the overhead of the loop iteration, memory loads, and function call.</li>
+        </ul>
+    </li>
+    <li><strong>Scalability Issue:</strong> The total number of inner loop iterations (before culling) is `imageWidth * imageHeight * numCircles`. The tile culling reduces this, but the work done *per pixel* still depends heavily on how many circles overlap its tile. In dense scenes (rand100k, rand1M), many circles might overlap any given tile, causing each pixel thread in that tile to iterate over a large fraction of the total circles, leading to the observed poor scaling. The work is fundamentally O(Pixels * Circles_overlapping_tile) rather than something closer to O(Pixels + Circles).</li>
+  </ol>
+  <p>
+    Therefore, the problem is the inefficient distribution of work: iterating through all potentially relevant circles for every single pixel, causing massive redundant checks and computation within each thread block.
+  </p>
+
+</body>
+</html>

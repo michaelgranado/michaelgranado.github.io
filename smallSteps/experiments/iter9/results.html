@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <link rel="stylesheet" href="/styles.css">
+    </head>
+    <body>
+        <pre>
+13d12
+&lt; 
+15c14
+&lt;                                          invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
+---
+&gt;                                         invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
+17,20c16
+&lt;     float tileL = invWidth * (blockIdx.x * blockDim.x);
+&lt;     float tileR = invWidth * ((blockIdx.x + 1) * blockDim.x);
+&lt;     float tileB = invHeight * (blockIdx.y * blockDim.y);
+&lt;     float tileT = invHeight * ((blockIdx.y + 1) * blockDim.y);
+---
+&gt;     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+22,26d17
+&lt;     int pixelOffset = 4 * (pixelY * imageWidth + pixelX);
+&lt;     float4* imgPtrGlobal = (float4*)(&cuConstRendererParams.imageData[pixelOffset]);
+&lt; 
+&lt;     float4 accumulatedColor = *imgPtrGlobal;
+&lt; 
+33,36c24,27
+&lt;         if (circleInBoxConservative(p.x, p.y, rad, tileL, tileR, tileT, tileB)) {
+&lt; 		shadePixel(circleIndex, pixelCenterNorm, p, accumulatedColor);
+&lt;         }
+&lt;     } 
+---
+&gt;         float diffX = p.x - pixelCenterNorm.x;
+&gt;         float diffY = p.y - pixelCenterNorm.y;
+&gt;         float pixelDist = diffX * diffX + diffY * diffY;
+&gt;         float maxDist = rad * rad;
+38c29,32
+&lt;     *imgPtrGlobal = accumulatedColor;
+---
+&gt;         if (pixelDist &lt;= maxDist) {
+&gt;             shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+&gt;         }
+&gt;     }
+       </pre>
+    </body>
+</html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Parallel Computing Assignment Analysis</title>
+<style>
+body { font-family: sans-serif; }
+pre { background-color: #f4f4f4; border: 1px solid #ddd; padding: 10px; }
+code { font-family: monospace; }
+</style>
+</head>
+<body>
+<h1>CUDA Renderer Performance Analysis</h1>
+
+<h2>Problem Identification</h2>
+
+<p><strong>problem description:</strong>
+The primary performance bottleneck is that every CUDA thread, corresponding to a single output pixel, iterates through the *entire* list of circles. Although a conservative tile-based culling check (`circleInBoxConservative`) is performed to potentially skip the `shadePixel` calculation, each thread still performs N iterations (where N is the total number of circles), reading the position and radius of every circle from global memory and executing the culling check logic in each iteration. This results in computational complexity roughly proportional to (Image Width * Image Height * Number of Circles), leading to significant redundant computation and global memory access, especially for scenes with a large number of circles.
+</p>
+
+<p><strong>problem reasoning:</strong>
+The provided code implements a pixel-parallel approach where each thread is responsible for computing the final color of one pixel. The `kernelRenderCirclesTiled` kernel structure reflects this:
+</p>
+<pre><code class="language-cuda">
+__global__ void kernelRenderCirclesTiled() {
+    int pixelX = ...;
+    int pixelY = ...;
+    // ... setup ...
+    float4 accumulatedColor = *imgPtrGlobal; // Initial read
+
+    // Process all circles in order
+    for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
+        // Read circle data (GLOBAL MEMORY READS)
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIndex];
+
+        // Tile Culling Check (Computation per circle)
+        if (circleInBoxConservative(p.x, p.y, rad, tileL, tileR, tileT, tileB)) {
+            // Potentially expensive shading, but only if check passes
+	        shadePixel(circleIndex, pixelCenterNorm, p, accumulatedColor);
+        }
+    } // End loop over circles
+
+    // Write the final accumulated color to global memory ONCE
+    *imgPtrGlobal = accumulatedColor;
+}
+</code></pre>
+<p>
+I examined the test harness results. The `rgb` scene with only 3 circles performs very well, essentially matching the reference time. However, as the number of circles increases (`rand10k`, `rand100k`, `rand1M`, `micro2M`), the student's time increases dramatically and becomes significantly slower (10x-27x) than the reference implementation. This scaling behavior strongly suggests that the amount of work performed by each thread is heavily dependent on the total number of circles.
+</p>
+<p>
+The loop `for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++)` confirms this dependency. Even though the `circleInBoxConservative` check prunes some work (specifically, the call to `shadePixel`), it doesn't reduce the number of loop iterations. For every pixel, the thread must:
+<ol>
+    <li>Iterate `numCircles` times.</li>
+    <li>Read the position (`p`) and radius (`rad`) of each circle from global memory within the loop.</li>
+    <li>Compute the `circleInBoxConservative` check for each circle.</li>
+</ol>
+For scenes like `rand1M` or `micro2M`, this means each of the ~1 million pixel threads performs 1 million or 2 million iterations, respectively. Each iteration involves global memory reads and the culling computation. This massive amount of redundant work, particularly the repeated global memory accesses for circle data and the culling checks for circles far away from the pixel's tile, is the dominant performance bottleneck. The conservative nature of the culling check might even allow circles that don't intersect the specific pixel (but do intersect the broader tile) to pass, leading to unnecessary calls to `shadePixel`, although the primary cost is the loop overhead itself for large N.
+</p>
+
+</body>
+</html>

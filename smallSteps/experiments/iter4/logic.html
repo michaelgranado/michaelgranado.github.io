@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CUDA Renderer Performance Analysis</title>
+</head>
+<body style="background: lightyellow;">
+    <h1>CUDA Renderer Performance Analysis</h1>
+    <hr>
+    <h2>Problem Identification</h2>
+    <p><strong>Problem Description:</strong></p>
+    <p>The current implementation iterates through every circle for each pixel, even after tile-based culling. While tile culling (`circleInBoxConservative`) reduces the workload by skipping circles guaranteed not to overlap the entire tile (thread block), each thread within the block still loops through all remaining potentially relevant circles for that tile, regardless of whether those circles actually overlap the specific pixel the thread is responsible for.</p>
+
+    <p><strong>Problem Reasoning:</strong></p>
+    <p>
+        The provided code uses a pixel-parallel approach (`kernelRenderCirclesTiled`), where each thread is assigned a single pixel. The core logic inside the kernel involves a loop: <code>for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++)</code>.
+    </p>
+    <p>
+        Inside this loop, there's a tile culling check: <code>if (circleInBoxConservative(...))</code>. This check determines if a circle *might* intersect the bounding box of the entire thread block (tile). If it passes this conservative check, the thread proceeds to call <code>shadePixel</code>.
+    </p>
+    <p>
+        The key issue is that the tile culling check prunes circles based on the *tile*, not the individual *pixel*. Therefore, if a circle overlaps *any* part of the tile, *all* threads in that block whose pixels are within the image bounds will execute the body of the `if` statement. This includes reading the circle's position and radius from global memory (<code>*(float3*)(&cuConstRendererParams.position[index3])</code> and <code>cuConstRendererParams.radius[circleIndex]</code>) and calling <code>shadePixel</code>. The actual check for whether the circle covers the *specific pixel* (`pixelDist > maxDist`) only happens inside <code>shadePixel</code>.
+    </p>
+    <p>
+        The test harness results clearly show this inefficiency. The `rgb` scene with only 3 circles is fast. However, scenes with many circles (`rand10k`, `rand100k`, `rand1M`, `micro2M`, `snowsingle`) are drastically slower than the reference solution. The execution time scales very poorly with the number of circles (<code>numCircles</code>). This indicates that the dominant cost is the work done *per circle* within the pixel processing loop. Even with tile culling, each pixel thread processes far too many circles that ultimately do not contribute to its final color, leading to redundant computation and global memory accesses. The workload per pixel remains proportional to the number of circles that overlap its tile, rather than just the circles overlapping the pixel itself.
+    </p>
+
+</body>
+</html>
