@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    </head>
+   <body style="background: lightyellow;">
+       <h2>Prompt</h2>
+       <pre style="white-space: pre-wrap; word-break: keep-all;">
+You are a Teaching Assistant for a Parallel Computing course at Stanford University and you are trying to complete a student's programming assignment. You will be given the programming task instructions, correct but unoptimized code, a description of the problem with the code, and the reasons as to why the problem exists in the code. In addition to this, you are also given supplementary code files which detail subroutines mentioned in the instructions. You will also be given the code that implements a solution to the problem.
+
+Please give. Please output your response in an HTML format.
+
+Answer using the following schema:
+solution description: Please describe the solution that was implemented in order to solve the problem.
+solution reasoning: Please give a potential reasoning as to how the student came up with the solution.
+
+### Instructions:
+&lt;instructions&gt;
+{instructions}
+&lt;/instructions&gt;
+
+------
+
+### Correct, Unoptimized Code:
+&lt;correct_unoptimized_code&gt;
+{correct_code}
+&lt;/correct_unoptimized_code&gt;
+
+------
+
+### Problem Description:
+&lt;problem_description&gt;
+{problem_description}
+&lt;/problem_description&gt;
+
+------
+
+### Problem Reasoning:
+&lt;problem_reasoning&gt;
+{problem_reasoning}
+&lt;/problem_reasoning&gt;
+
+------
+
+### Supplementary Code:
+&lt;supplementary_code_1&gt;
+{suppl_one}
+&lt;/supplementary_code_1&gt;
+
+&lt;supplementary_code_2&gt;
+{suppl_two}
+&lt;/supplementary_code_2&gt;
+
+&lt;supplementary_code_3&gt;
+{suppl_three}
+&lt;/supplementary_code_3&gt;
+
+------
+
+### Solution Code:
+&lt;solution_code&gt;
+{solution_code}
+&lt;/solution_code&gt;
+       </pre>
+       <a href="../../correctness/prompts/prompt_files/instructions.html">Instructions</a>
+       <br>
+       <a href="./correctCode.html">Correct, Unoptimized Code</a>
+       <br>
+       <a href="./problem_description.html">Problem Description</a>
+       <br>
+       <a href="./problem_description.html">Problem Reasoning</a>
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_1.html">Supplementary Code #1</a>
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_2.html">Supplementary Code #2</a>       
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
+       <br>
+       <a href="./solutionCode.html">Solution Code</a>
+   </body>
+</html>

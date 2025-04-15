@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <link rel="stylesheet" href="/styles.css">
+    </head>
+    <body>
+        <pre>
+The current kernelRenderCirclesTiled kernel, while correct, suffers from significant performance issues on scenes with many circles. Each pixel thread iterates through the entire list of circles (numCircles), performing global memory reads (position, radius) and a tile culling check (circleInBoxConservative) for every circle, even if the circle is nowhere near the pixel's tile. This leads to redundant computations and high global memory bandwidth usage, especially in sparse regions of the image or scenes with a large number of circles relative to the number that actually overlap any given tile.
+       </pre>
+    </body>
+</html>
