@@ -21,27 +21,20 @@
 #include "sceneLoader.h"
 #include "util.h"
 
-// Include the cuda error checking macro (optional but recommended)
-#define DEBUG
-#ifdef DEBUG
-#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
-inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess)
-   {
-      fprintf(stderr, "CUDA Error: %s at %s:%d\\n",
-        cudaGetErrorString(code), file, line);
-      if (abort) exit(code);
-   }
-}
-#else
-#define cudaCheckError(ans) ans
-#endif
+// Include the circle-box intersection tests
+#include "circleBoxTest.cu_inl"
+// Note: If using exclusiveScan, include it here and define SCAN_BLOCK_DIM
+// #define SCAN_BLOCK_DIM (TILE_DIM_X * TILE_DIM_Y) // Example if needed
+// #include "exclusiveScan.cu_inl"
 
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Putting all the cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
+
+// Define tile dimensions (should match blockDim in host code launch)
+#define TILE_DIM_X 16
+#define TILE_DIM_Y 16
 
 struct GlobalConstants {
 
@@ -60,7 +53,9 @@ struct GlobalConstants {
 
 // Global variable that is in scope, but read-only, for all cuda
 // kernels.  The __constant__ modifier designates this variable will
-// be stored in special "constant" memory on the GPU.
+// be stored in special "constant" memory on the GPU. (we didn't talk
+// about this type of memory in class, but constant memory is a fast
+// place to put read-only variables).
 __constant__ GlobalConstants cuConstRendererParams;
 
 // read-only lookup tables used to quickly compute noise (needed by
@@ -73,13 +68,17 @@ __constant__ float  cuConstNoise1DValueTable[256];
 #define COLOR_MAP_SIZE 5
 __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 
-// including parts of the CUDA code from external files
+
+// including parts of the CUDA code from external files to keep this
+// file simpler and to seperate code that should not be modified
 #include "noiseCuda.cu_inl"
 #include "lookupColor.cu_inl"
-#include "circleBoxTest.cu_inl" // Include the circle-box test functions
+
 
 // kernelClearImageSnowflake -- (CUDA device code)
-// Clears image to a gradient for snowflake scenes
+//
+// Clear the image, setting the image to the white-gray gradation that
+// is used in the snowflake image
 __global__ void kernelClearImageSnowflake() {
 
     int imageX = blockIdx.x * blockDim.x + threadIdx.x;
@@ -94,13 +93,16 @@ __global__ void kernelClearImageSnowflake() {
     int offset = 4 * (imageY * width + imageX);
     float shade = .4f + .45f * static_cast&lt;float&gt;(height-imageY) / height;
     float4 value = make_float4(shade, shade, shade, 1.f);
-    // write to global memory using float4 for efficiency
+
+    // write to global memory: As an optimization, I use a float4
+    // store, that results in more efficient code than if I coded this
+    // up as four seperate fp32 stores.
     *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
 }
 
-
 // kernelClearImage --  (CUDA device code)
-// Clears image to a solid color
+//
+// Clear the image, setting all pixels to the specified color rgba
 __global__ void kernelClearImage(float r, float g, float b, float a) {
 
     int imageX = blockIdx.x * blockDim.x + threadIdx.x;
@@ -115,16 +117,15 @@ __global__ void kernelClearImage(float r, float g, float b, float a) {
     int offset = 4 * (imageY * width + imageX);
     float4 value = make_float4(r, g, b, a);
 
-    // write to global memory using float4 for efficiency
+    // write to global memory: As an optimization, I use a float4
+    // store, that results in more efficient code than if I coded this
+    // up as four seperate fp32 stores.
     *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
 }
 
-
-// Animation Kernels
-// (Keep existing animation kernels: kernelAdvanceFireWorks, kernelAdvanceHypnosis,
-// kernelAdvanceBouncingBalls, kernelAdvanceSnowflake without changes)
-
 // kernelAdvanceFireWorks
+//
+// Update the position of the fireworks (if circle is firework)
 __global__ void kernelAdvanceFireWorks() {
     const float dt = 1.f / 60.f;
     const float pi = 3.14159;
@@ -141,6 +142,7 @@ __global__ void kernelAdvanceFireWorks() {
     if (0 &lt;= index && index &lt; NUM_FIREWORKS) { // firework center; no update
         return;
     }
+
     // determine the fire-work center/spark indices
     int fIdx = (index - NUM_FIREWORKS) / NUM_SPARKS;
     int sfIdx = (index - NUM_FIREWORKS) % NUM_SPARKS;
@@ -186,6 +188,8 @@ __global__ void kernelAdvanceFireWorks() {
 }
 
 // kernelAdvanceHypnosis
+//
+// Update the radius/color of the circles
 __global__ void kernelAdvanceHypnosis() {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index &gt;= cuConstRendererParams.numCircles)
@@ -204,6 +208,8 @@ __global__ void kernelAdvanceHypnosis() {
 
 
 // kernelAdvanceBouncingBalls
+//
+// Update the positino of the balls
 __global__ void kernelAdvanceBouncingBalls() {
     const float dt = 1.f / 60.f;
     const float kGravity = -2.8f; // sorry Newton
@@ -245,7 +251,11 @@ __global__ void kernelAdvanceBouncingBalls() {
     }
 }
 
-// kernelAdvanceSnowflake
+// kernelAdvanceSnowflake -- (CUDA device code)
+//
+// move the snowflake animation forward one time step.  Updates circle
+// positions and velocities.  Note how the position of the snowflake
+// is reset if it moves off the left, right, or bottom of the screen.
 __global__ void kernelAdvanceSnowflake() {
 
     int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -266,10 +276,11 @@ __global__ void kernelAdvanceSnowflake() {
     float3 position = *((float3*)positionPtr);
     float3 velocity = *((float3*)velocityPtr);
 
-    // hack to make farther circles move more slowly
+    // hack to make farther circles move more slowly, giving the
+    // illusion of parallax
     float forceScaling = fmin(fmax(1.f - position.z, .1f), 1.f); // clamp
 
-    // add some noise to the motion
+    // add some noise to the motion to make the snow flutter
     float3 noiseInput;
     noiseInput.x = 10.f * position.x;
     noiseInput.y = 10.f * position.y;
@@ -293,7 +304,9 @@ __global__ void kernelAdvanceSnowflake() {
 
     float radius = cuConstRendererParams.radius[index];
 
-    // if the snowflake has moved off screen, reset its position
+    // if the snowflake has moved off the left, right or bottom of
+    // the screen, place it back at the top and give it a
+    // pseudorandom x position and velocity.
     if ( (position.y + radius &lt; 0.f) ||
          (position.x + radius) &lt; -0.f ||
          (position.x - radius) &gt; 1.f)
@@ -306,7 +319,8 @@ __global__ void kernelAdvanceSnowflake() {
         position.x = .5f + .5f * noiseForce.x;
         position.y = 1.35f + radius;
 
-        // restart from 0 vertical velocity.
+        // restart from 0 vertical velocity.  Choose a
+        // pseudo-random horizontal velocity.
         velocity.x = 2.f * noiseForce.y;
         velocity.y = 0.f;
     }
@@ -319,147 +333,137 @@ __global__ void kernelAdvanceSnowflake() {
 
 // shadePixel -- (CUDA device code)
 //
-// Given a pixel center, circle properties, and a pointer to the pixel's data in
-// global memory, calculates the circle's contribution and blends it *in place*.
-// Ensures atomicity and order implicitly because it's called by only one thread
-// per pixel, sequentially for each overlapping circle relevant to that pixel.
+// given a pixel and a circle, determines the contribution to the
+// pixel from the circle.  Update of the image is done in this
+// function. Called by the rendering kernel.
+// IMPORTANT: This function assumes it's called in the correct circle order
+// for a given pixel and handles the read-modify-write of the pixel color.
 __device__ __inline__ void
 shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
 
-    // Calculate squared distance from pixel center to circle center
-    // Note: The caller (kernelRenderCirclesTiled) already checked if
-    // pixelDistSq &lt;= maxDistSq before calling this function.
-    // Recomputing pixelDistSq here is slightly redundant but keeps the function self-contained.
-    // For maximum performance, the caller could compute sqrt(pixelDistSq)/rad and pass it.
+    // Caller should already have checked if pixel is potentially covered.
+    // Recompute distance here for shading falloff if needed.
     float diffX = p.x - pixelCenter.x;
     float diffY = p.y - pixelCenter.y;
-    float pixelDistSq = diffX * diffX + diffY * diffY;
+    float pixelDistSq = diffX * diffX + diffY * diffY; // Use squared distance
 
     float rad = cuConstRendererParams.radius[circleIndex];
     float maxDistSq = rad * rad;
 
-    // Early exit if somehow called for a pixel outside the circle
-    // (Should not happen with the current calling logic, but safe to keep).
+    // Precise check (redundant if caller checked perfectly, but safe)
     if (pixelDistSq &gt; maxDistSq)
         return;
 
     float3 rgb;
     float alpha;
 
-    // Determine circle color and alpha based on scene type
+    // Compute shading value based on scene type
     if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
         const float kCircleMaxAlpha = .5f;
         const float falloffScale = 4.f;
 
-        // Calculate normalized distance for shading effects
-        float normPixelDist = sqrtf(pixelDistSq) / rad;
-        rgb = lookupColor(normPixelDist); // Color lookup based on normalized distance
+        // Avoid sqrt if possible, use squared distances for falloff
+        float normPixelDistSq = pixelDistSq / maxDistSq; // Normalized squared distance [0, 1]
+        rgb = lookupColor(sqrtf(normPixelDistSq)); // lookupColor likely expects non-squared distance
 
-        // Calculate alpha based on depth (z) and distance from center
         float maxAlpha = .6f + .4f * (1.f-p.z);
-        maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f); // Clamp and scale alpha
-        alpha = maxAlpha * expf(-1.f * falloffScale * normPixelDist * normPixelDist); // Exponential falloff
+        maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f); // kCircleMaxAlpha * clamped value
+        alpha = maxAlpha * expf(-1.f * falloffScale * normPixelDistSq); // Use squared distance in exp
 
     } else {
-        // Simple case: fixed color per circle
+        // Simple: each circle has an assigned color
         int index3 = 3 * circleIndex;
-        // Use float3 load for color
         rgb = *(float3*)&(cuConstRendererParams.color[index3]);
-        alpha = .5f; // Constant alpha for non-snowflake scenes
+        // Use a fixed alpha or read from color array if it were RGBA
+        alpha = .5f; // Assuming fixed alpha for non-snowflake scenes as per original code
     }
 
     float oneMinusAlpha = 1.f - alpha;
 
-    // ----- Blending Operation (Read-Modify-Write) -----
-    // Read the current pixel color from global memory (*imagePtr)
+    // BEGIN ATOMIC REGION (Implicitly atomic due to single thread per pixel)
+    // Read current pixel color
     float4 existingColor = *imagePtr;
 
-    // Blend the new circle's color over the existing color using standard "over" operator
+    // Blend new color
     float4 newColor;
     newColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
     newColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
     newColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
-    // The alpha channel update in the original code `newColor.w = alpha + existingColor.w;`
-    // doesn't correspond to standard alpha blending. We'll keep it to match the reference behavior.
-    // For standard alpha blending, it would be:
-    // newColor.w = alpha + existingColor.w * oneMinusAlpha; // or simply existingColor.w if background is opaque
-    newColor.w = alpha + existingColor.w; // Matching original reference behavior
+    // Accumulate alpha, or handle compositing differently if needed.
+    // Original code just added alpha, which isn't standard Over operator alpha.
+    // Let's stick to the original logic for now:
+    newColor.w = alpha + existingColor.w; // Or maybe: existingColor.w + alpha * (1.f - existingColor.w) for correct 'Over' alpha? Sticking to original.
 
-    // Write the updated color back to the *same* global memory location
+    // Write updated color back to global memory
     *imagePtr = newColor;
-    // ----- End Blending Operation -----
+    // END ATOMIC REGION
 }
 
 
-// kernelRenderCirclesTiled -- (CUDA device code) - OPTIMIZED VERSION
+// kernelRenderCirclesTiled -- (CUDA device code)
 //
-// Each thread renders a single pixel. It iterates through all circles,
-// but quickly skips circles whose bounding boxes do not overlap the thread block's tile
-// using circleInBoxConservative. This preserves the order and atomicity guarantees
-// while significantly reducing computation.
-__global__ void kernelRenderCirclesTiled(int tileWidth, int tileHeight) {
-    // Calculate global pixel coordinates (x, y) for this thread
+// Optimized renderer using pixel-centric approach with tile-based culling.
+// Each thread processes one pixel, iterating through circles in order.
+// It uses a conservative box test to skip circles far from the pixel's tile.
+__global__ void kernelRenderCirclesTiled() {
+    // Calculate global pixel coordinates for this thread
     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
 
     int imageWidth = cuConstRendererParams.imageWidth;
     int imageHeight = cuConstRendererParams.imageHeight;
 
-    // Boundary check: Exit if thread's pixel is outside the image
+    // Check if this thread's pixel is within the image bounds
     if (pixelX &gt;= imageWidth || pixelY &gt;= imageHeight)
         return;
 
-    // Precompute inverse width/height for normalization
+    // Calculate normalized pixel center [0, 1]
     float invWidth = 1.f / imageWidth;
     float invHeight = 1.f / imageHeight;
-
-    // Calculate the center of this thread's pixel in normalized coordinates [0, 1]
     float2 pixelCenterNorm = make_float2(invWidth * (static_cast&lt;float&gt;(pixelX) + 0.5f),
                                         invHeight * (static_cast&lt;float&gt;(pixelY) + 0.5f));
 
-    // Calculate the bounding box of this thread block's tile in normalized coordinates [0, 1]
-    // Tile boundaries correspond to the edges of the pixels in the tile.
-    float tileBoxL = invWidth * (blockIdx.x * blockDim.x);           // Left edge of the leftmost pixel
-    float tileBoxR = invWidth * ((blockIdx.x * blockDim.x) + blockDim.x); // Right edge of the rightmost pixel
-    float tileBoxB = invHeight * (blockIdx.y * blockDim.y);           // Bottom edge of the bottommost pixel
-    float tileBoxT = invHeight * ((blockIdx.y * blockDim.y) + blockDim.y); // Top edge of the topmost pixel
+    // Calculate the boundaries of this thread block's tile in normalized coordinates [0, 1]
+    // Tile coords (pixel units): [blockIdx.x * TILE_DIM_X, (blockIdx.x+1)*TILE_DIM_X)
+    //                             [blockIdx.y * TILE_DIM_Y, (blockIdx.y+1)*TILE_DIM_Y)
+    // Tile coords (normalized):
+    float tileL_norm = invWidth * (blockIdx.x * TILE_DIM_X);
+    float tileR_norm = invWidth * ((blockIdx.x + 1) * TILE_DIM_X);
+    float tileB_norm = invHeight * (blockIdx.y * TILE_DIM_Y);     // Bottom edge (lower Y)
+    float tileT_norm = invHeight * ((blockIdx.y + 1) * TILE_DIM_Y); // Top edge (higher Y)
 
-    // Get a pointer to this pixel's color data (RGBA float4) in global memory
+    // Get a pointer to this pixel's color data in global memory
     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
 
-    // Iterate through all circles in the scene, processing them in order
+    // Process all circles sequentially to maintain order
     for (int circleIndex = 0; circleIndex &lt; cuConstRendererParams.numCircles; circleIndex++) {
         int index3 = 3 * circleIndex;
 
-        // Read circle position (center x, y, z) and radius from global memory
+        // Read circle position and radius from global memory
         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
         float rad = cuConstRendererParams.radius[circleIndex];
 
-        // ***** OPTIMIZATION: Tile Culling *****
-        // Use the conservative circle-in-box test to check if the circle
-        // potentially overlaps with this thread block's tile.
-        if (circleInBoxConservative(p.x, p.y, rad, tileBoxL, tileBoxR, tileBoxT, tileBoxB))
-        {
-            // The circle *might* overlap the tile.
-            // Now perform the precise check for this specific pixel.
-
-            // Compute squared distance from pixel center to circle center
-            float diffX = p.x - pixelCenterNorm.x;
-            float diffY = p.y - pixelCenterNorm.y;
-            float pixelDistSq = diffX * diffX + diffY * diffY;
-            float maxDistSq = rad * rad;
-
-            // If the pixel center is within the circle's radius (precise check)
-            if (pixelDistSq &lt;= maxDistSq) {
-                // Blend this circle's contribution onto the pixel's current color.
-                // shadePixel reads from *imgPtr, blends, and writes back to *imgPtr.
-                shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
-            }
+        // *** OPTIMIZATION: CONSERVATIVE TILE CULLING ***
+        // Use circleInBoxConservative to check if the circle *might* intersect the tile.
+        // If it doesn't intersect the tile, it cannot intersect any pixel within the tile.
+        if (!circleInBoxConservative(p.x, p.y, rad, tileL_norm, tileR_norm, tileT_norm, tileB_norm)) {
+            // Skip this circle for this pixel thread
+            continue;
         }
-        // If circleInBoxConservative returned false, the circle is definitely
-        // outside this tile, so we skip the precise check and shading for this circle.
+
+        // *** ORIGINAL LOGIC (but only if circle passed the tile test) ***
+        // Compute squared distance from pixel center to circle center
+        float diffX = p.x - pixelCenterNorm.x;
+        float diffY = p.y - pixelCenterNorm.y;
+        float pixelDistSq = diffX * diffX + diffY * diffY;
+        float maxDistSq = rad * rad;
+
+        // If pixel center is within the circle's radius (using squared distances)
+        if (pixelDistSq &lt;= maxDistSq) {
+            // Update the pixel's color by blending this circle's contribution
+            shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+        }
     }
-    // After the loop, *imgPtr contains the final, correctly ordered blended color for this pixel.
 }
 
 
@@ -467,14 +471,17 @@ __global__ void kernelRenderCirclesTiled(int tileWidth, int tileHeight) {
 // CudaRenderer Class Implementation
 ////////////////////////////////////////////////////////////////////////////////////////
 
+
 CudaRenderer::CudaRenderer() {
     image = NULL;
+
     numCircles = 0;
-    position = NULL; // Host pointers
+    position = NULL;
     velocity = NULL;
     color = NULL;
     radius = NULL;
-    cudaDevicePosition = NULL; // Device pointers
+
+    cudaDevicePosition = NULL;
     cudaDeviceVelocity = NULL;
     cudaDeviceColor = NULL;
     cudaDeviceRadius = NULL;
@@ -482,89 +489,87 @@ CudaRenderer::CudaRenderer() {
 }
 
 CudaRenderer::~CudaRenderer() {
+
     if (image) {
-        delete image; // Free host image buffer
+        delete image;
     }
 
-    // Host memory (position, velocity, etc.) is assumed to be managed
-    // externally (e.g., by SceneLoader) based on typical assignment structure.
-    // If CudaRenderer allocated it, it should free it here.
+    // Host memory allocated by loadCircleScene is deleted there or managed externally
+    // No need to delete[] position, etc. here if they point to scene-loaded memory
 
-    // Free CUDA device memory
-    if (cudaDevicePosition) cudaCheckError(cudaFree(cudaDevicePosition));
-    if (cudaDeviceVelocity) cudaCheckError(cudaFree(cudaDeviceVelocity));
-    if (cudaDeviceColor) cudaCheckError(cudaFree(cudaDeviceColor));
-    if (cudaDeviceRadius) cudaCheckError(cudaFree(cudaDeviceRadius));
-    if (cudaDeviceImageData) cudaCheckError(cudaFree(cudaDeviceImageData));
+    if (cudaDevicePosition) {
+        cudaFree(cudaDevicePosition);
+        cudaFree(cudaDeviceVelocity);
+        cudaFree(cudaDeviceColor);
+        cudaFree(cudaDeviceRadius);
+        cudaFree(cudaDeviceImageData);
+    }
 }
 
 const Image*
 CudaRenderer::getImage() {
-    // Copy the final rendered image from device memory back to host memory
-    printf("Copying image data from device to host...\n");
-    cudaCheckError(cudaMemcpy(image-&gt;data,
-               cudaDeviceImageData,
-               sizeof(float) * 4 * image-&gt;width * image-&gt;height,
-               cudaMemcpyDeviceToHost));
-    // Ensure the copy completes before returning the host pointer
-    cudaCheckError(cudaDeviceSynchronize());
-    printf("Image data copied.\n");
+
+    // Copy the rendered image data from device memory to host memory
+    // printf("Copying image data from device\n"); // Optional: for debugging
+
+    cudaError_t err = cudaMemcpy(image-&gt;data,
+                                 cudaDeviceImageData,
+                                 sizeof(float) * 4 * image-&gt;width * image-&gt;height,
+                                 cudaMemcpyDeviceToHost);
+
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error during image copy: %s\n", cudaGetErrorString(err));
+    }
+
     return image;
 }
 
 void
 CudaRenderer::loadScene(SceneName scene) {
     sceneName = scene;
-    // loadCircleScene is expected to populate the host pointers:
-    // numCircles, position, velocity, color, radius
+    // loadCircleScene now manages the host memory for position, velocity, etc.
     loadCircleScene(sceneName, numCircles, position, velocity, color, radius);
-    printf("Loaded scene %d with %d circles.\n", (int)sceneName, numCircles);
+    printf("Loaded scene %d: %d circles\n", scene, numCircles);
 }
 
 void
 CudaRenderer::setup() {
-    // Initialize CUDA, print device info
+
     int deviceCount = 0;
-    cudaCheckError(cudaGetDeviceCount(&deviceCount));
-    printf("---------------------------------------------------------\\n");
+    std::string name;
+    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+
+    printf("---------------------------------------------------------\n");
     printf("Initializing CUDA for CudaRenderer\n");
     printf("Found %d CUDA devices\n", deviceCount);
+
     for (int i=0; i&lt;deviceCount; i++) {
         cudaDeviceProp deviceProps;
-        cudaCheckError(cudaGetDeviceProperties(&deviceProps, i));
+        cudaGetDeviceProperties(&deviceProps, i);
+        name = deviceProps.name;
         printf("Device %d: %s\n", i, deviceProps.name);
         printf("   SMs:        %d\n", deviceProps.multiProcessorCount);
         printf("   Global mem: %.0f MB\n", static_cast&lt;float&gt;(deviceProps.totalGlobalMem) / (1024 * 1024));
         printf("   CUDA Cap:   %d.%d\n", deviceProps.major, deviceProps.minor);
     }
-    printf("---------------------------------------------------------\\n");
+    printf("---------------------------------------------------------\n");
 
-    // Allocate memory on the CUDA device for scene data and image buffer
-    printf("Allocating device memory...\n");
-    cudaCheckError(cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numCircles));
-    cudaCheckError(cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numCircles));
-    cudaCheckError(cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numCircles));
-    cudaCheckError(cudaMalloc(&cudaDeviceRadius, sizeof(float) * numCircles));
-    // Ensure image dimensions are set via allocOutputImage before setup is called
-    if (!image) {
-        fprintf(stderr, "Error: allocOutputImage must be called before setup().\n");
-        exit(1);
-    }
-    cudaCheckError(cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image-&gt;width * image-&gt;height));
-    printf("Device memory allocated.\n");
+    // Allocate memory on the CUDA device
+    // Use cudaCheckError wrapper if defined for better debugging
+    cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numCircles);
+    cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numCircles);
+    cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numCircles);
+    cudaMalloc(&cudaDeviceRadius, sizeof(float) * numCircles);
+    cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image-&gt;width * image-&gt;height);
 
-
-    // Copy scene data from host arrays to device arrays
-    printf("Copying scene data to device...\n");
-    cudaCheckError(cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
-    cudaCheckError(cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
-    cudaCheckError(cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice));
-    cudaCheckError(cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numCircles, cudaMemcpyHostToDevice));
-    printf("Scene data copied.\n");
+    // Copy data from host memory to device memory
+    cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
+    cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numCircles, cudaMemcpyHostToDevice);
 
 
-    // Initialize parameters structure and copy it to constant memory
-    printf("Setting up constant memory parameters...\n");
+    // Initialize parameters in constant memory
     GlobalConstants params;
     params.sceneName = sceneName;
     params.numCircles = numCircles;
@@ -575,135 +580,138 @@ CudaRenderer::setup() {
     params.color = cudaDeviceColor;
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
-    cudaCheckError(cudaMemcpyToSymbol(cuConstRendererParams, &amp;params, sizeof(GlobalConstants)));
 
-    // Copy noise tables to constant memory
+    cudaMemcpyToSymbol(cuConstRendererParams, &amp;params, sizeof(GlobalConstants));
+
+    // Copy noise lookup tables to constant memory
     int* permX;
     int* permY;
     float* value1D;
     getNoiseTables(&permX, &permY, &value1D);
-    cudaCheckError(cudaMemcpyToSymbol(cuConstNoiseXPermutationTable, permX, sizeof(int) * 256));
-    cudaCheckError(cudaMemcpyToSymbol(cuConstNoiseYPermutationTable, permY, sizeof(int) * 256));
-    cudaCheckError(cudaMemcpyToSymbol(cuConstNoise1DValueTable, value1D, sizeof(float) * 256));
+    cudaMemcpyToSymbol(cuConstNoiseXPermutationTable, permX, sizeof(int) * 256);
+    cudaMemcpyToSymbol(cuConstNoiseYPermutationTable, permY, sizeof(int) * 256);
+    cudaMemcpyToSymbol(cuConstNoise1DValueTable, value1D, sizeof(float) * 256);
 
-    // Copy color ramp table to constant memory
+    // Copy color lookup table to constant memory
     float lookupTable[COLOR_MAP_SIZE][3] = {
-        {1.f, 1.f, 1.f}, {1.f, 1.f, 1.f}, {.8f, .9f, 1.f},
-        {.8f, .9f, 1.f}, {.8f, 0.8f, 1.f}
+        {1.f, 1.f, 1.f},
+        {1.f, 1.f, 1.f},
+        {.8f, .9f, 1.f},
+        {.8f, .9f, 1.f},
+        {.8f, 0.8f, 1.f},
     };
-    cudaCheckError(cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE));
+    cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE);
 
-    printf("Constant memory setup complete.\n");
-    // Ensure all setup operations (allocs, copies) are complete
-    cudaCheckError(cudaDeviceSynchronize());
+    printf("CUDA setup complete.\n");
 }
 
+// allocOutputImage --
+//
+// Allocate buffer the renderer will render into. Check status of
+// image first to avoid memory leak.
 void
 CudaRenderer::allocOutputImage(int width, int height) {
-    // Allocate host image buffer
-    if (image) delete image;
+
+    if (image)
+        delete image;
     image = new Image(width, height);
-    printf("Allocated host output image buffer (%d x %d).\n", width, height);
-    // Note: Corresponding device memory (cudaDeviceImageData) is allocated in setup().
+    printf("Allocated output image %dx%d\n", width, height);
 }
 
+// clearImage --
+//
+// Clear's the renderer's target image. The state of the image after
+// the clear depends on the scene being rendered.
 void
 CudaRenderer::clearImage() {
-    // Use 2D thread blocks, e.g., 16x16 = 256 threads
-    const int TILE_WIDTH = 16;
-    const int TILE_HEIGHT = 16;
-    dim3 blockDim(TILE_WIDTH, TILE_HEIGHT, 1);
-    // Calculate grid dimensions to cover the entire image
+    // Use 16x16 blocks (256 threads) - matches TILE_DIM_X/Y
+    dim3 blockDim(TILE_DIM_X, TILE_DIM_Y, 1);
     dim3 gridDim(
         (image-&gt;width + blockDim.x - 1) / blockDim.x,
         (image-&gt;height + blockDim.y - 1) / blockDim.y);
 
-    printf("Clearing image on device (Grid: %d x %d, Block: %d x %d)...\n", gridDim.x, gridDim.y, blockDim.x, blockDim.y);
-
-    // Launch the appropriate clear kernel based on scene
     if (sceneName == SNOWFLAKES || sceneName == SNOWFLAKES_SINGLE_FRAME) {
         kernelClearImageSnowflake&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
     } else {
-        // Clear to white (1,1,1,1) for other scenes
+        // Clear to white by default
         kernelClearImage&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(1.f, 1.f, 1.f, 1.f);
     }
-    // Check for errors during kernel launch
-    cudaCheckError(cudaGetLastError());
-    // Ensure clear operation is complete before proceeding
-    cudaCheckError(cudaDeviceSynchronize());
-    printf("Image cleared.\n");
+    // Check for errors after kernel launch
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error during clearImage kernel launch: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize(); // Ensure clear completes before proceeding
 }
 
+// advanceAnimation --
+//
+// Advance the simulation one time step. Updates all circle positions
+// and velocities
 void
 CudaRenderer::advanceAnimation() {
-     // Use 1D blocks for animation kernels (processing circles)
-    const int ANIM_BLOCK_SIZE = 256; // Or 512, depending on kernel needs/performance
-    dim3 blockDim(ANIM_BLOCK_SIZE, 1);
-    // Calculate grid dimension to cover all circles
+     // Use 1D blocks for animation kernels
+    dim3 blockDim(256, 1); // 256 threads per block is reasonable
     dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
 
-    // Select and launch the appropriate animation kernel
-    bool animation_launched = false;
+    // Launch the appropriate animation kernel based on the scene
     if (sceneName == SNOWFLAKES) {
-        printf("Advancing snowflake animation...\n");
         kernelAdvanceSnowflake&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
-        animation_launched = true;
     } else if (sceneName == BOUNCING_BALLS) {
-        printf("Advancing bouncing balls animation...\n");
         kernelAdvanceBouncingBalls&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
-        animation_launched = true;
     } else if (sceneName == HYPNOSIS) {
-        printf("Advancing hypnosis animation...\n");
         kernelAdvanceHypnosis&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
-        animation_launched = true;
     } else if (sceneName == FIREWORKS) {
-        printf("Advancing fireworks animation...\n");
         kernelAdvanceFireWorks&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
-        animation_launched = true;
+    } else {
+        // No animation for other scenes
+        return;
     }
 
-    if (animation_launched) {
-        // Check for kernel launch errors
-        cudaCheckError(cudaGetLastError());
-         // Ensure animation update is finished before rendering
-        cudaCheckError(cudaDeviceSynchronize());
-        printf("Animation advanced.\n");
-    } else {
-        // No animation needed for this scene
+    // Check for errors after kernel launch
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error during advanceAnimation kernel launch: %s\n", cudaGetErrorString(err));
     }
+    cudaDeviceSynchronize(); // Ensure animation step completes
 }
 
 
 void
 CudaRenderer::render() {
-    // Define tile dimensions (match the block dimensions)
-    // 16x16 = 256 threads per block is generally a good starting point
-    const int TILE_WIDTH = 16;
-    const int TILE_HEIGHT = 16;
-    dim3 blockDim(TILE_WIDTH, TILE_HEIGHT);
-
-    // Calculate grid dimensions needed to cover all pixels with these tiles
+    // Set up a 2D grid of threads, where each block processes one tile.
+    // Block dimensions must match TILE_DIM_X/Y used in the kernel.
+    dim3 blockDim(TILE_DIM_X, TILE_DIM_Y);
     dim3 gridDim(
         (image-&gt;width + blockDim.x - 1) / blockDim.x,
         (image-&gt;height + blockDim.y - 1) / blockDim.y);
 
-    printf("Rendering image with Tiled Kernel (Grid: %d x %d, Block: %d x %d)...\n", gridDim.x, gridDim.y, blockDim.x, blockDim.y);
+    // Launch the optimized rendering kernel
+    kernelRenderCirclesTiled&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
 
-    // Launch the optimized tiled rendering kernel, passing tile dimensions
-    kernelRenderCirclesTiled&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;(TILE_WIDTH, TILE_HEIGHT);
+    // Check for errors after kernel launch
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error during render kernel launch: %s\n", cudaGetErrorString(err));
+    }
 
-    // Check for kernel launch errors immediately
-    cudaCheckError(cudaGetLastError());
-
-    // Synchronize to ensure rendering is complete before the function returns
-    // (e.g., before getImage() might be called for timing or verification)
-    cudaCheckError(cudaDeviceSynchronize());
-    printf("Rendering complete.\n");
+    // Synchronize to ensure rendering is complete before potential image copy
+    cudaDeviceSynchronize();
 }
 
-// The CudaRenderer::shadePixel method declared in the header is not used
-// in the device-centric rendering approach. The actual work happens in the
-// __device__ shadePixel function called by the kernel.
+// shadePixel implementation is now __device__ __inline__ near the kernel definition
+
+// Placeholder for the old host-side shadePixel if needed, but it's unused now.
+void CudaRenderer::shadePixel(
+    int circleIndex,
+    float pixelCenterX, float pixelCenterY,
+    float px, float py, float pz,
+    float* pixelData)
+{
+    // This host-side version is no longer called by the CUDA kernel.
+    // Kept here only for API compatibility if called elsewhere (unlikely).
+    fprintf(stderr, "Warning: Host-side CudaRenderer::shadePixel called!\n");
+}
        </pre>
     </body>
 </html>
