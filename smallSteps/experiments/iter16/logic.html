@@ -36,11 +36,11 @@ My thought process for selecting option A involved analyzing the provided "corre
 
 1.  **Examine Kernel Launch Configuration:** I first looked at how `kernelRenderCirclesTiled` is launched in the `CudaRenderer::render` function:
     ```c++
-    dim3 blockDim(1, 1); // 256 threads per block <-- The comment is misleading/wrong!
+    dim3 blockDim(1, 1); // 256 threads per block &lt;-- The comment is misleading/wrong!
     dim3 gridDim(
-        (image->width + TILE_DIM_X - 1) / TILE_DIM_X,
-        (image->height + TILE_DIM_Y - 1) / TILE_DIM_Y);
-    kernelRenderCirclesTiled<<<gridDim, blockDim>>>();
+        (image-&gt;width + TILE_DIM_X - 1) / TILE_DIM_X,
+        (image-&gt;height + TILE_DIM_Y - 1) / TILE_DIM_Y);
+    kernelRenderCirclesTiled&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
     ```
     The crucial part is `dim3 blockDim(1, 1)`. This configuration explicitly tells the CUDA runtime to launch each block with only **one** thread (1x1=1).
 
@@ -53,8 +53,8 @@ My thought process for selecting option A involved analyzing the provided "corre
         ```c++
         for (int i = 0; i < circle_list_length; i++) {
             // ... get circle data ...
-            for (int pixelX = start_pixel_x; pixelX < end_pixel_x; pixelX++) {
-                for (int pixelY = start_pixel_y; pixelY < end_pixel_y; pixelY++) {
+            for (int pixelX = start_pixel_x; pixelX &lt; end_pixel_x; pixelX++) {
+                for (int pixelY = start_pixel_y; pixelY &lt; end_pixel_y; pixelY++) {
                     // ... read pixel, shadePixel, write pixel ...
                 }
             }
@@ -90,7 +90,7 @@ Here's a detailed breakdown:
 3.  **Serial Processing within Tile:** The kernel's structure forces this single thread to perform the following steps largely serially for its assigned tile:
     *   Iterate through all circles in batches (`for (int circleIndex = ...)`).
     *   Perform tile culling for each circle in the batch (`if (circleInBoxConservative(...))`).
-    *   Iterate through the list of circles potentially overlapping the tile (`for (int i = 0; i < circle_list_length; i++)`).
+    *   Iterate through the list of circles potentially overlapping the tile (`for (int i = 0; i &lt; circle_list_length; i++)`).
     *   Crucially, **nested inside the circle loop**, iterate through *every single pixel* within the tile (`for (int pixelX = ...)` and `for (int pixelY = ...)`).
     *   For each pixel-circle combination, read the current pixel color from global memory (`float4 color = *imgPtrGlobal;`), execute the `shadePixel` function (which involves distance calculations and potentially color lookups/blending), and write the updated pixel color back to global memory (`*imgPtrGlobal = color;`).
 
