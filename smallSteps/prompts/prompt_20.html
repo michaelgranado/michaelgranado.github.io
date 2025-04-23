@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    </head>
+   <body style="background: lightyellow;">
+       <h2>Prompt</h2>
+       <pre style="white-space: pre-wrap; word-break: keep-all;">
+You are a Teaching Assistant for a Parallel Computing course at Stanford University and you are trying to complete a student's programming assignment. You will be given the programming task      instructions, correct but unoptimized code, a performance analysis report of the current code, and a description of potential solutions. In addition to this, you are also given supplementary code      files which detail subroutines mentioned in the instructions.
+
+### Instructions:
+&lt;instructions&gt;
+{instructions}
+&lt;/instructions&gt;
+
+------
+
+### Correct, Unoptimized Code:
+&lt;correct_unoptimized_code&gt;
+{correct_code}
+&lt;/correct_unoptimized_code&gt;
+
+------
+
+### Performance Analysis:
+&lt;performance_analysis&gt;
+{performance_analysis}
+&lt;/performance_analysis&gt;
+
+------
+
+### Solution Descriptions:
+&lt;solution_descriptions&gt;
+{solution_descriptions}
+&lt;/solution_descriptions&gt;
+
+------
+
+### Supplementary Code:
+&lt;supplementary_code_1&gt;
+{suppl_one}
+&lt;/supplementary_code_1&gt;
+
+&lt;supplementary_code_2&gt;
+{suppl_two}
+&lt;/supplementary_code_2&gt;
+
+&lt;supplementary_code_3&gt;
+{suppl_three}
+&lt;/supplementary_code_3&gt;
+
+------
+Your task is to modify the renderer so that it implements the SIMPLEST VERSION of the Solution 4 while STILL ENSURING that the program returns the CORRECT result. Please output your response in an HTML format.
+
+Answer using the following schema:
+simplest solution: Propose the SIMPLEST VERSION of solution 4. The simplest solution should simplify the creation of any data structure, perhaps by removing the need for synchronization (__syncthreads) or atomic operations during the data structure's creation.
+code: Generated code that incorporates your proposed simplest solution. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Do not output testing code.
+
+       </pre>
+       <a href="../../correctness/prompts/prompt_files/instructions.html">Instructions</a>
+       <br>
+       <a href="./correctCode.html">Correct, Unoptimized Code</a>
+       <br>
+       <a href="./performance_analysis.html">Performance Analysis</a>
+       <br>
+       <a href="./solution_descriptions.html">Solution Descriptions</a>
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_1.html">Supplementary Code #1</a>
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_2.html">Supplementary Code #2</a>       
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
+   </body>
+</html>
