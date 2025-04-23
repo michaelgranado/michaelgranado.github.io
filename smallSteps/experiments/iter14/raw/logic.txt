@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Assignment 3 Analysis</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; }
+        h1, h2, h3 { color: #333; }
+        code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 4px; }
+        .question { margin-bottom: 20px; border-left: 4px solid #007bff; padding-left: 15px; }
+        .answer { margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>Analysis of Unoptimized CUDA Circle Renderer</h1>
+
+    <div class="question">
+        <h2>Question 1</h2>
+        <p>This question is a multiple choice question, and you may only select a single option.</p>
+        <p>
+            A) Inefficient assignment of work.<br>
+            B) Lack of parallelism.<br>
+            C) Low arithmetic intensity.
+        </p>
+        <p>Which of the choices above is the cause of the performance problem in the code?</p>
+        <div class="answer">
+            <strong>Selected Option:</strong> A) Inefficient assignment of work.
+        </div>
+    </div>
+
+    <div class="question">
+        <h2>Question 2</h2>
+        <p>Describe the thought process you had when selecting your answer to Question 1.</p>
+        <div class="answer">
+            <p>My thought process for selecting option A involved analyzing the structure of the provided CUDA kernel (`kernelRenderCirclesOrdered`) and correlating it with the performance results from the test harness.</p>
+            <ol>
+                <li><strong>Analyze the Kernel Structure:</strong> The `kernelRenderCirclesOrdered` function implements a "pixel-parallel" approach. It launches a 2D grid of threads where each thread is responsible for computing the final color of a single pixel (<code>pixelX</code>, <code>pixelY</code>).</li>
+                <li><strong>Analyze Work Per Thread:</strong> Inside the kernel, each thread executes a loop that iterates through <em>every single circle</em> in the scene (<code>for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++)</code>). For each circle, it performs calculations (loading position/radius, calculating distance) to determine if the circle covers the pixel.</li>
+                <li><strong>Identify Redundancy:</strong> This structure implies a massive amount of redundant work. A single circle typically covers only a small fraction of the image pixels. However, every pixel thread checks every circle, regardless of how far away that circle is. For a scene with N circles and P pixels, the total number of circle-pixel checks performed is N * P. Most of these checks are unnecessary because the circle is nowhere near the pixel.</li>
+                <li><strong>Evaluate Parallelism (Option B):</strong> The code <em>does</em> exhibit parallelism. It launches potentially millions of threads (one for each pixel). Therefore, a "lack of parallelism" is not the core issue. The problem lies in <em>how</em> the parallelism is utilized.</li>
+                <li><strong>Evaluate Arithmetic Intensity (Option C):</strong> Arithmetic intensity is the ratio of floating-point operations to memory operations. While the blending in `shadePixel` involves computation, the dominant factor in `kernelRenderCirclesOrdered`'s loop is the repeated check for each circle. This involves memory accesses (reading circle position/radius, potentially reading/writing pixel data multiple times per pixel if not optimized within `shadePixel`) and arithmetic (distance calculation). While the intensity might not be extremely high, the primary issue isn't the balance of math vs. memory within the *useful* work, but rather the sheer volume of *unnecessary* work (both math and memory accesses) being performed due to the chosen algorithm. The inefficiency stems from the O(N*P) complexity.</li>
+                <li><strong>Evaluate Work Assignment (Option A):</strong> Assigning each pixel thread the task of iterating through all circles is fundamentally an inefficient way to distribute the work. It doesn't leverage spatial locality – the fact that a circle only influences nearby pixels. This leads directly to the redundant computations and memory accesses identified earlier.</li>
+                <li><strong>Correlate with Test Results:</strong> The test results strongly support this conclusion. The performance is acceptable for `rgb` (N=3 circles) but degrades dramatically as N increases (`rand10k`, `rand100k`, `rand1M`, `micro2M`). The student's time scales very poorly with the number of circles, indicating that the O(N*P) work complexity is the bottleneck. This directly points to the inefficient assignment of work as the root cause.</li>
+            </ol>
+            <p>Therefore, the most accurate description of the performance problem is the "Inefficient assignment of work," where each pixel thread performs far more work than necessary by checking every circle in the scene.</p>
+        </div>
+    </div>
+
+    <div class="question">
+        <h2>Question 3</h2>
+        <p>Please give a detailed description of the problem that you identified in the current implementation.</p>
+        <div class="answer">
+            <p>The primary performance problem in the provided `CudaRenderer::render` function, specifically within the `kernelRenderCirclesOrdered` CUDA kernel, is its highly inefficient computational strategy based on a **pixel-centric approach with exhaustive circle checking**. </p>
+            <p>Here's a breakdown of the issue:</p>
+            <ol>
+                <li><strong>Work Decomposition:</strong> The kernel launches a grid of threads where each thread corresponds to a single pixel in the output image. This is a common parallel pattern ("parallelism across pixels").</li>
+                <li><strong>Per-Thread Workload:</strong> The critical inefficiency lies in the work performed by each individual pixel thread. Every thread executes a loop that iterates from `circleIndex = 0` to `numCircles - 1`. Inside this loop, for each circle in the <em>entire scene</em>, the thread:
+                    <ul>
+                        <li>Loads the circle's properties (position `p`, radius `rad`) from global memory (via `cuConstRendererParams`).</li>
+                        <li>Calculates the squared distance between the pixel's center (`pixelCenterNorm`) and the circle's center.</li>
+                        <li>Compares this distance to the circle's squared radius (`maxDist`).</li>
+                        <li>If the pixel is within the circle, it calls `shadePixel` to compute the color contribution and blend it with the current pixel value (read-modify-write on `imgPtr`).</li>
+                    </ul>
+                </li>
+                <li><strong>Massive Redundancy (Computational Inefficiency):</strong> The core problem is that this approach forces every pixel thread to consider every circle, regardless of spatial locality. A circle only influences pixels within its bounding box. For any given pixel, the vast majority of circles in the scene (especially in scenes like `rand1M` or `micro2M`) are nowhere near it. Despite this, the thread still performs the memory reads for the circle's data and the distance calculation, only to find that `pixelDist > maxDist`. This results in an enormous amount of wasted computation. The total work complexity scales as O(Number of Pixels * Number of Circles), which is highly inefficient compared to approaches that consider only potentially relevant circle-pixel interactions.</li>
+                <li><strong>Memory Bandwidth Inefficiency:</strong> Each thread repeatedly accesses the circle data array (`cuConstRendererParams.position`, `cuConstRendererParams.radius`) for all `numCircles`. While `cuConstRendererParams` utilizes constant memory which has caching benefits, repeatedly streaming through potentially megabytes or gigabytes of circle data for *each pixel thread* consumes significant memory bandwidth unnecessarily. Furthermore, the `shadePixel` function, as implemented within this loop, performs a read-modify-write operation on the pixel data in global memory (`*imgPtr`) for every circle that covers the pixel.</li>
+                <li><strong>Ignoring Spatial Locality:</strong> The algorithm completely ignores the spatial nature of the problem. It does not use any acceleration structures (like grids or bounding volume hierarchies) or techniques (like tile-based rendering or sorting circles by location) to quickly discard circles that cannot possibly affect a given pixel or region of pixels.</li>
+            </ol>
+            <p>In essence, the current implementation correctly ensures atomicity and order by processing circles sequentially within each pixel thread. However, it achieves this correctness at the cost of extreme performance inefficiency by performing N*P work, where N is the number of circles and P is the number of pixels, instead of work proportional to the actual number of circle-pixel overlaps, which is typically much smaller.</p>
+        </div>
+    </div>
+
+</body>
+</html>

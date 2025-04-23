@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Assignment 3 Analysis</title>
+<style>
+  body { font-family: sans-serif; }
+  code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 4px; }
+  .question { font-weight: bold; margin-top: 1em; }
+  .answer { margin-left: 1em; margin-bottom: 1em; }
+</style>
+</head>
+<body>
+
+<h1>Analysis of CUDA Circle Renderer Performance</h1>
+
+<div class="question">
+Question 1: This question is a multiple choice question, and you may only select a single option.
+<br>
+A) Inefficient assignment of work. <br>
+B) Lack of parallelism. <br>
+C) Low arithmetic intensity. <br>
+<br>
+Which of the choices above is the cause of the performance problem in the code?
+</div>
+
+<div class="answer">
+  <b>Selected Option:</b> A) Inefficient assignment of work.
+</div>
+
+<div class="question">
+Question 2: Describe the thought process you had when selecting your answer to Question 1.
+</div>
+
+<div class="answer">
+  <p>My thought process for selecting option A involved analyzing the provided CUDA code (`kernelRenderCirclesTiled`), the performance results, and the nature of the rendering task:</p>
+  <ol>
+    <li><b>Analyze the Kernel Structure:</b> The `kernelRenderCirclesTiled` kernel parallelizes the problem by assigning each thread to compute the final color for a single pixel. This is a valid parallel decomposition ("parallelism across pixels").</li>
+    <li><b>Examine the Workload per Thread:</b> Inside the kernel, each thread executes a loop: <code>for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++)</code>. This loop iterates over *every single circle* in the scene for *every single pixel*.</li>
+    <li><b>Evaluate the Culling Strategy:</b> The code uses a conservative tile-based culling check (<code>circleInBoxConservative</code>). This check determines if a circle *might* overlap the entire tile (e.g., 16x16 pixels) processed by a thread block. If the circle *could* overlap the tile, *all* threads within that block proceed to process that circle further.</li>
+    <li><b>Identify Redundancy and Inefficiency:</b> The core issue arises here. Even with tile culling, if a circle overlaps the tile, every thread (pixel) in that tile's block iterates for that circle, reads its data (position, radius) from global memory, and calls <code>shadePixel</code>. The <code>shadePixel</code> function then performs the *actual* point-in-circle test for the specific pixel. This means:
+        <ul>
+            <li>A thread processes many circles that, while potentially overlapping the tile, do not actually cover the thread's specific pixel.</li>
+            <li>Significant redundant work is performed, as each thread iterates through the full circle list, leading to N_pixels * N_circles iterations (minus those culled at the tile level).</li>
+            <li>This leads to excessive computation (loop overhead, distance checks) and, critically, excessive global memory bandwidth usage, as circle data is read repeatedly by many threads, often unnecessarily.</li>
+        </ul>
+    </li>
+    <li><b>Consider Other Options:</b>
+        <ul>
+            <li><b>B) Lack of parallelism:</b> This is incorrect. The code *does* exploit parallelism across pixels by launching a 2D grid of threads. The problem isn't the *absence* of parallelism, but *how* the parallel work is structured.</li>
+            <li><b>C) Low arithmetic intensity:</b> While the redundant memory accesses likely make the kernel memory-bound (contributing to low effective arithmetic intensity), the *reason* for the excessive memory access and low intensity is the inefficient work assignment. Addressing the work assignment (e.g., by having each pixel only consider circles that actually overlap it, perhaps using a spatial data structure) is the root cause fix, which would consequently improve arithmetic intensity. Therefore, "Inefficient assignment of work" is the more fundamental cause.</li>
+        </ul>
+    </li>
+     <li><b>Correlate with Test Results:</b> The performance results strongly support this conclusion. The runtime scales extremely poorly as the number of circles increases (compare `rgb` vs. `rand10k` vs. `rand100k` vs. `rand1M`). This indicates that the amount of work per pixel is heavily dependent on the total number of circles, which is characteristic of the "iterate through all circles per pixel" approach. The reference solution is much faster, suggesting it employs a more efficient strategy that avoids this N*M complexity.</li>
+  </ol>
+  <p>Therefore, the most accurate description of the performance bottleneck is the inefficient assignment of work, where each pixel thread is burdened with iterating through and performing initial processing for far too many circles that do not contribute to its final color.</p>
+</div>
+
+<div class="question">
+Question 3: Please give a detailed description of the problem that you identified in the current implementation.
+</div>
+
+<div class="answer">
+  <p>The primary performance problem in the provided <code>kernelRenderCirclesTiled</code> implementation lies in its highly inefficient method of assigning work to threads, leading to massive redundant computation and memory access, especially for scenes with a large number of circles.</p>
+
+  <p>The current strategy assigns each CUDA thread the task of computing the final color for a single output pixel. To achieve this, every thread executes a loop that iterates through the *entire list* of circles present in the scene (from index 0 to <code>numCircles - 1</code>). While a coarse-grained optimization exists in the form of a tile-based culling check (<code>circleInBoxConservative</code>), this check only prevents further processing if a circle lies completely outside the bounding box of the thread block's tile (e.g., a 16x16 pixel region). </p>
+
+  <p>The inefficiency arises because:</p>
+  <ol>
+    <li><b>Excessive Iteration:</b> Each thread iterates N times, where N is the total number of circles. For an image with M pixels, this leads to roughly M * N loop iterations across all threads (before tile culling). For scenes like `rand1M` (1 million circles) and a 1024x1024 image (approx. 1 million pixels), this approaches a trillion iterations, which is computationally infeasible for real-time performance.</li>
+    <li><b>Coarse Culling Ineffectiveness:</b> The tile-based culling only helps if a circle is entirely outside the tile. If a circle overlaps *any* part of the tile, *all* threads within that tile's block (e.g., 256 threads for a 16x16 tile) will still execute the loop body for that circle. They will read the circle's properties (position, radius) from global memory and call the <code>shadePixel</code> function.</li>
+    <li><b>Redundant Computation and Memory Access:</b> Inside the loop, after passing the coarse tile cull, the <code>shadePixel</code> function performs the precise point-in-circle test for the thread's specific pixel coordinates. For a typical circle within a tile, it will only cover a fraction of the pixels in that tile. This means the vast majority of the 256 threads processing that circle within the block are doing redundant work: they read the circle's data from global memory and perform calculations within <code>shadePixel</code> only to determine that the circle doesn't cover their specific pixel. This dramatically inflates the global memory bandwidth requirements (repeatedly reading the same circle data) and wastes computational cycles.</li>
+  </ol>
+
+  <p>In essence, the algorithm forces each pixel to consider almost every circle, even those geometrically distant, unless they happen to fall entirely outside the pixel's local tile. This "N circles per pixel" approach scales very poorly with the number of circles, as clearly demonstrated by the extremely slow performance on test cases like `rand100k`, `rand1M`, and `micro2M` compared to the reference implementation.</p>
+</div>
+
+</body>
+</html>
