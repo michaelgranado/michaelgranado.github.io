@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Solution 4 Implementations</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; }
+        h1, h2, h3 { color: #333; }
+        code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+        li { margin-bottom: 10px; }
+        .implementation { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }
+        .rank { font-weight: bold; color: #0056b3; }
+        .pros-cons { margin-top: 10px; }
+        .pros-cons strong { display: block; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+
+    <h1>Solution 4 Implementations: Cooperative Tile Processing with Pre-Filtering</h1>
+    <p>
+        The core idea of Solution 4 is to avoid having each pixel thread iterate through all circles. Instead, we first determine which circles are relevant to a given tile (a block of pixels processed by a thread block) and create a "filtered list" for that tile. Then, threads within the block only process circles from this smaller, tile-specific list. This requires two main phases:
+    </p>
+    <ol>
+        <li><strong>Pre-filtering:</strong> Create per-tile lists of potentially overlapping circle indices. This must preserve the relative order of circles as they appear in the input.</li>
+        <li><strong>Tile Rendering:</strong> Launch a kernel where each thread block processes one tile. Threads within the block cooperatively access the pre-filtered list for their tile and render the relevant circles onto their assigned pixels, maintaining order and atomicity.</li>
+    </ol>
+    <p>
+        Here are several ways to implement this, ranked from least to most difficult for a programmer less experienced with complex CUDA patterns, while ensuring correctness (atomicity and order preservation):
+    </p>
+
+    <hr>
+
+    <div class="implementation">
+        <h3><span class="rank">Rank 1 (Easiest):</span> CPU Pre-filtering into a Global Compacted List</h3>
+        <p>
+            <strong>Description:</strong>
+            The pre-filtering step is done entirely on the CPU before launching the main rendering kernel. The CPU iterates through all circles (in order 0 to N-1). For each circle, it checks which tiles it might overlap using a conservative test (like <code>circleInBoxConservative</code> adapted for CPU). It builds temporary lists of circle indices for each tile. After processing all circles, these temporary lists are compacted into a single large array in global GPU memory (`filteredCircleIndices`). Two auxiliary arrays, `tileOffsets` and `tileCounts`, are also created and copied to the GPU. `tileOffsets[tileID]` stores the starting index in `filteredCircleIndices` for that tile, and `tileCounts[tileID]` stores the number of relevant circles for that tile.
+        </p>
+        <p>
+            The CUDA rendering kernel (`kernelRenderCirclesTiledFiltered`) is launched with one block per tile. Each block reads its `offset` and `count` from `tileOffsets` and `tileCounts`. Each thread (pixel) within the block then iterates <em>only</em> from `i = 0` to `count - 1`. Inside the loop, it calculates the actual circle index `circleIdx = filteredCircleIndices[offset + i]`, fetches the circle's data (position, radius, color) from global memory using `circleIdx`, performs the precise `shadePixel` check (point-in-circle), and accumulates color in registers. Finally, it writes the accumulated pixel color once to global memory.
+        </p>
+        <div class="pros-cons">
+            <strong>Pros:</strong>
+            <ul>
+                <li><strong>Simplicity:</strong> Conceptually the easiest. The complex filtering logic is standard C++ code on the CPU. The GPU kernel becomes simpler as it only iterates over a pre-defined range.</li>
+                <li><strong>Clear Separation:</strong> Separates the filtering logic from the rendering logic cleanly.</li>
+                <li><strong>Order Guarantee:</strong> Order is naturally preserved because the CPU iterates circles 0 to N-1 when building the lists. The GPU kernel processes the list sequentially.</li>
+                <li><strong>Atomicity Guarantee:</strong> Atomicity is maintained by accumulating color in registers per-pixel and writing only once, just like the original correct solution.</li>
+            </ul>
+            <strong>Cons:</strong>
+            <ul>
+                <li><strong>CPU Bottleneck:</strong> The CPU filtering step might become a bottleneck, especially for scenes with many circles and/or large images (many tiles).</li>
+                <li><strong>Memory Transfer:</strong> Requires transferring the potentially large `filteredCircleIndices`, `tileOffsets`, and `tileCounts` arrays from CPU to GPU each frame (or whenever circles change significantly).</li>
+                <li><strong>CPU Memory Usage:</strong> Building temporary lists on the CPU might require significant host memory.</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="implementation">
+        <h3><span class="rank">Rank 2 (Moderate):</span> GPU Pre-filtering using Atomics into a Global Compacted List</h3>
+        <p>
+            <strong>Description:</strong>
+            This approach moves the filtering step onto the GPU using multiple kernel launches, typically involving atomic operations and prefix sums (scan).
+        </p>
+        <ol>
+            <li><strong>Kernel 1 (Count Overlaps):</strong> Launch a kernel where each thread processes one circle. For each circle, the thread determines which tiles it overlaps (conservatively). For each overlap with tile `T`, it atomically increments a global counter `tileCounts[T]`.</li>
+            <li><strong>Prefix Sum (Scan):</strong> Perform an exclusive prefix sum (scan) operation on the `tileCounts` array (either using Thrust or a custom scan implementation like the provided `sharedMemExclusiveScan` adapted for global memory or used block-wise). The result of the scan gives the `tileOffsets` array. The total sum from the scan gives the total size needed for the `filteredCircleIndices` array.</li>
+            <li><strong>Kernel 2 (Populate List):</strong> Launch another kernel, again typically one thread per circle. Each thread re-calculates the tiles its circle overlaps. For each overlapping tile `T`, the thread atomically increments *another* counter specific to that tile, say `tileWritePos[T]` (initialized to 0 before the kernel launch), and gets the previous value (`localOffset`). It then writes the circle's index (`circleIdx`) into the main list at `filteredCircleIndices[tileOffsets[T] + localOffset]`.</li>
+            <li><strong>Render Kernel:</strong> Use the same `kernelRenderCirclesTiledFiltered` as in Rank 1, using the GPU-generated `filteredCircleIndices`, `tileOffsets`, and `tileCounts`.</li>
+        </ol>
+        <div class="pros-cons">
+            <strong>Pros:</strong>
+            <ul>
+                <li><strong>GPU Parallelism for Filtering:</strong> Leverages the GPU's parallelism for the potentially costly filtering step, likely faster than CPU filtering for large scenes.</li>
+                <li><strong>Reduced CPU-GPU Transfer:</strong> Avoids transferring the large index list from CPU to GPU.</li>
+                <li><strong>Order Guarantee:</strong> Although atomics introduce concurrency, Kernel 2 processes circles in order (thread 0 processes circle 0, etc.). When multiple threads write to the same tile's list section concurrently, atomics ensure distinct slots. The render kernel reads the list sequentially, respecting the relative order established during population. Circles appearing earlier in the input array will generally be placed earlier in a tile's sub-list.</li>
+                <li><strong>Atomicity Guarantee:</strong> Render kernel maintains atomicity via register accumulation.</li>
+            </ul>
+            <strong>Cons:</strong>
+            <ul>
+                <li><strong>Increased GPU Complexity:</strong> Requires understanding and correctly implementing atomic operations and prefix sums (scan) on the GPU.</li>
+                <li><strong>Multiple Kernel Launches:</strong> Involves several kernel launches and synchronizations for the filtering phase, adding overhead.</li>
+                <li><strong>Atomic Contention:</strong> Atomic operations can become bottlenecks if many threads contend for the same counters (e.g., many small circles overlapping the same central tiles).</li>
+            </ul>
+        </div>
+    </div>
+
+     <div class="implementation">
+        <h3><span class="rank">Rank 3 (Harder):</span> GPU Pre-filtering (Sort-Based) into a Global Compacted List</h3>
+        <p>
+            <strong>Description:</strong>
+            This avoids atomics during list population in the filtering stage by using sorting, often considered more complex than the atomic approach for beginners.
+        </p>
+        <ol>
+            <li><strong>Kernel 1 (Generate Pairs & Counts):</strong> Launch a kernel (1 thread per circle). Each thread finds overlapping tiles. It calculates *how many* tiles its circle overlaps (`numOverlaps`). It also outputs pairs of `(tileID, circleIndex)` for each overlap into a temporary global array.</li>
+            <li><strong>Scan 1:</strong> Scan the `numOverlaps` array to determine the total number of pairs and the offsets for each circle to write its pairs into a compacted `tileCirclePairs` array.</li>
+            <li><strong>Kernel 2 (Write Pairs):</strong> Launch a kernel (1 thread per circle). Using the offsets from Scan 1, each thread writes its `(tileID, circleIndex)` pairs into the `tileCirclePairs` array.</li>
+            <li><strong>Sort:</strong> Sort the `tileCirclePairs` array based on `tileID` as the primary key (using Thrust's `sort_by_key` or a custom GPU sort). This groups all pairs for the same tile together. The relative order of `circleIndex` for a given `tileID` should be preserved if a stable sort is used, or if the initial pair generation implicitly ordered them.</li>
+            <li><strong>Kernel 3 / Scan 2 (Find Offsets/Counts & Final List):</strong> Process the sorted `tileCirclePairs` array to find the boundaries (start offsets and counts) for each `tileID`. This can be done with another kernel or scan-like operations (e.g., marking the start of each new `tileID` sequence). Extract just the `circleIndex` part into the final `filteredCircleIndices` array. Generate `tileOffsets` and `tileCounts`.</li>
+            <li><strong>Render Kernel:</strong> Use the same `kernelRenderCirclesTiledFiltered` as in Rank 1.</li>
+        </ol>
+        <div class="pros-cons">
+            <strong>Pros:</strong>
+            <ul>
+                <li><strong>Avoids Atomic Contention during List Fill:</strong> Replaces potentially contended atomics in the list population step with sorting.</li>
+                <li><strong>GPU Parallelism for Filtering:</strong> Fully utilizes GPU for filtering.</li>
+                <li><strong>Order Guarantee:</strong> Sorting by `tileID` groups relevant circles. If a stable sort is used or pairs are generated carefully, the original relative order of circles within a tile's list is maintained.</li>
+                <li><strong>Atomicity Guarantee:</strong> Render kernel maintains atomicity via register accumulation.</li>
+            </ul>
+            <strong>Cons:</strong>
+            <ul>
+                <li><strong>Highest GPU Complexity:</strong> Requires scan and complex GPU sorting (either using a library like Thrust or implementing one). Managing intermediate arrays and multiple complex kernels is challenging.</li>
+                <li><strong>Sorting Overhead:</strong> GPU sorting has its own overhead, which might be significant depending on the number of circle-tile overlaps.</li>
+                <li><strong>More Intermediate Storage:</strong> Requires temporary storage for pairs before sorting.</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="implementation">
+        <h3><span class="rank">Rank 4 (Very Hard):</span> Cooperative Filtering within Render Kernel using Shared Memory</h3>
+        <p>
+            <strong>Description:</strong>
+            This attempts to perform filtering *within* the rendering kernel using shared memory, avoiding separate filtering kernels and large global lists. However, it's significantly more complex to implement correctly and efficiently.
+        </p>
+        <p>
+            The render kernel (one block per tile) would operate in phases:
+        </p>
+        <ol>
+            <li><strong>Load Chunk:</strong> Threads in the block cooperatively load a *chunk* of the global circle data (e.g., 256 circles' positions/radii) into shared memory. `__syncthreads()`.</li>
+            <li><strong>Filter Chunk:</strong> Each thread (or a subset of threads) checks circles in the shared memory chunk against the block's tile boundaries (conservative test).</li>
+            <li><strong>Build Shared List:</strong> Threads that find an overlapping circle need to add its *index within the chunk* (or its global index) to *another* shared memory array (`tileFilteredIndices`). This requires using shared memory atomics (`atomicAdd` on a shared counter) to get a unique index in `tileFilteredIndices` and to count the number of relevant circles in this chunk (`numFilteredThisChunk`). `__syncthreads()`.</li>
+            <li><strong>Process Filtered Chunk:</strong> Each thread (pixel) iterates from `k = 0` to `numFilteredThisChunk - 1`. It reads the `circleIndex` from `tileFilteredIndices[k]`. It *may* need to re-fetch full circle data from global memory if only indices were stored in shared memory. It performs the `shadePixel` logic and accumulates color in registers. `__syncthreads()` might be needed depending on access patterns.</li>
+            <li><strong>Repeat:</strong> Repeat steps 1-4 for the next chunk of global circles until all circles are processed.</li>
+            <li><strong>Final Write:</strong> Each thread writes its final accumulated pixel color to global memory.</li>
+        </ol>
+        <div class="pros-cons">
+            <strong>Pros:</strong>
+            <ul>
+                <li><strong>Reduced Global Memory Traffic (Potentially):</strong> Aims to reduce traffic by keeping intermediate filtered lists in shared memory and potentially reusing loaded circle data within the block.</li>
+                <li><strong>Single Kernel (Conceptually):</strong> Combines filtering and rendering into one kernel launch (though internally complex).</li>
+            </ul>
+            <strong>Cons:</strong>
+            <ul>
+                <li><strong>Extreme Complexity:</strong> Very difficult to implement correctly. Requires intricate management of shared memory, multiple synchronization points (`__syncthreads()`), shared memory atomics, and handling data across multiple chunks. High potential for deadlocks or race conditions if not done perfectly.</li>
+                <li><strong>Shared Memory Limitations:</strong> Shared memory is small. It might not fit a large enough chunk of circle data or the filtered list, limiting effectiveness.</li>
+                <li><strong>Shared Memory Atomics/Bank Conflicts:</strong> Shared atomics can be slow, and shared memory accesses must be carefully managed to avoid bank conflicts.</li>
+                <li><strong>Order Guarantee:</strong> Maintaining strict order across chunks processed non-atomically by different pixels requires very careful design. Order is preserved because chunks are processed sequentially, and the filtered list within each chunk is processed sequentially by each pixel thread.</li>
+                <li><strong>Atomicity Guarantee:</strong> Atomicity is maintained by register accumulation, but the complexity increases the risk of bugs affecting correctness.</li>
+            </ul>
+        </div>
+    </div>
+
+</body>
+</html>
