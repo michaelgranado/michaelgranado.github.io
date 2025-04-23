@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Incremental Plan for Cooperative Tile Processing</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 20px; }
+        h1, h2 { color: #333; }
+        .step { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; background-color: #f9f9f9; }
+        .step h3 { margin-top: 0; color: #0056b3; }
+        code { background-color: #e4e4e4; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+        strong { font-weight: bold; }
+        ul { margin-top: 10px; }
+        li { margin-bottom: 5px; }
+        .objective { font-style: italic; color: #555; margin-bottom: 10px;}
+        .correctness { color: #28a745; font-weight: bold; margin-top: 10px;}
+        .testing { color: #ffc107; font-weight: bold; margin-top: 5px;}
+    </style>
+</head>
+<body>
+
+    <h1>Incremental Plan: Cooperative Filtering within Render Kernel</h1>
+    <p>This plan outlines the steps to implement the "Cooperative Filtering within Render Kernel using Shared Memory" approach (Rank 4 difficulty). Each step aims to produce a functionally correct renderer, allowing you to run the checker after each modification, although performance may initially decrease before improving.</p>
+    <p><strong>Target Kernel:</strong> Modifications will primarily be within a kernel similar to the provided correct `kernelRenderCirclesTiled`, which assigns one thread per pixel.</p>
+    <p><strong>Core Idea Reminder:</strong> Process circles in chunks. For each chunk, cooperatively load relevant circle data into shared memory, filter this chunk against the tile boundaries, build a list of relevant circles for the tile in shared memory, and then have pixel threads process only the circles from this filtered list for the current chunk.</p>
+
+    <hr>
+
+    <div class="step">
+        <h3>Step 1: Introduce Chunked Processing Loop</h3>
+        <p class="objective">Modify the kernel to iterate through the global list of circles in fixed-size chunks, without changing the core rendering logic for each circle yet.</p>
+        <ul>
+            <li>Define a `CHUNK_SIZE` constant (e.g., 128 or 256). This should probably be related to your block dimensions but doesn't have to be identical initially.</li>
+            <li>Inside the kernel (`kernelRenderCirclesTiled` or a copy), replace the single `for` loop that iterates from `0` to `numCircles - 1` with an outer loop that iterates over chunks.
+                ```c++
+                // Example structure:
+                const int CHUNK_SIZE = 128; // Or another power of 2
+                for (int chunkStart = 0; chunkStart < cuConstRendererParams.numCircles; chunkStart += CHUNK_SIZE) {
+                    int chunkEnd = min(chunkStart + CHUNK_SIZE, cuConstRendererParams.numCircles);
+
+                    // Inner loop processes only circles within the current chunk
+                    for (int circleIndex = chunkStart; circleIndex < chunkEnd; circleIndex++) {
+                        // --- Keep the existing logic from kernelRenderCirclesTiled ---
+                        // Read circle data (position, radius) from global memory
+                        int index3 = 3 * circleIndex;
+                        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+                        float rad = cuConstRendererParams.radius[circleIndex];
+
+                        // Use the *existing* tile culling check (if any) or just proceed
+                        // For simplicity, you might temporarily remove the tile culling here
+                        // and rely only on the shadePixel check, or keep it as is.
+                        // We'll add cooperative filtering later.
+
+                        // Call shadePixel (which does the point-in-circle test)
+                        shadePixel(circleIndex, pixelCenterNorm, p, accumulatedColor);
+                        // --- End of existing logic ---
+                    }
+                    // NO __syncthreads() needed here yet, as threads are independent.
+                }
+                ```
+            </li>
+            <li>Ensure `accumulatedColor` is initialized correctly before the outer loop and the final write to global memory happens *after* the outer loop completes.</li>
+        </ul>
+        <p class="correctness">Correctness Check: This step only changes the order of iteration slightly (processing in chunks) but each pixel thread still considers every circle exactly once, applying `shadePixel` in the correct global circle order. The atomicity is maintained by register accumulation. The program should still pass the checker.</p>
+        <p class="testing">Testing: Run `./checker.py`. Expect similar or slightly worse performance than the baseline `kernelRenderCirclesTiled` due to loop overhead.</p>
+    </div>
+
+    <div class="step">
+        <h3>Step 2: Cooperative Loading of Chunk Data into Shared Memory</h3>
+        <p class="objective">Modify the chunk loop: Instead of each thread reading circle data from global memory individually, have the threads within the block cooperatively load the current chunk's necessary data (e.g., position, radius) into shared memory.</p>
+        <ul>
+            <li>Declare shared memory arrays within the kernel to hold the chunk's data. For `CHUNK_SIZE` circles, you'll need space for `CHUNK_SIZE * float3` (position) and `CHUNK_SIZE * float` (radius).
+                ```c++
+                __shared__ float sharedPositions[CHUNK_SIZE * 3];
+                __shared__ float sharedRadii[CHUNK_SIZE];
+                // Or using float3: __shared__ float3 sharedPositionsVec[CHUNK_SIZE];
+                ```
+             Make sure `CHUNK_SIZE` is small enough for the data to fit in available shared memory (~48KB limit per block usually).
+            </li>
+            <li>Inside the outer chunk loop (before the inner loop): Add code for threads in the block to cooperatively load data from `cuConstRendererParams.position` and `cuConstRendererParams.radius` (for `circleIndex` from `chunkStart` to `chunkEnd`) into the shared memory arrays. Each thread loads a portion of the data. A common pattern is using `threadIdx.x` (linearized if using 2D/3D blocks) to calculate which global circle data element(s) it should load into which shared memory slot.
+                ```c++
+                // Example loading (linear thread index assumed):
+                int tid = threadIdx.x + blockDim.x * threadIdx.y; // Linear thread ID within block
+                int threadsPerBlock = blockDim.x * blockDim.y;
+                for (int i = tid; i < CHUNK_SIZE; i += threadsPerBlock) {
+                    int globalCircleIndex = chunkStart + i;
+                    if (globalCircleIndex < chunkEnd) {
+                        // Load position (example for float array)
+                        sharedPositions[i * 3 + 0] = cuConstRendererParams.position[globalCircleIndex * 3 + 0];
+                        sharedPositions[i * 3 + 1] = cuConstRendererParams.position[globalCircleIndex * 3 + 1];
+                        sharedPositions[i * 3 + 2] = cuConstRendererParams.position[globalCircleIndex * 3 + 2];
+                        // Load radius
+                        sharedRadii[i] = cuConstRendererParams.radius[globalCircleIndex];
+                    } else {
+                        // Optional: Pad unused shared memory slots if needed, e.g., with invalid radius
+                         sharedRadii[i] = -1.0f;
+                    }
+                }
+                ```
+            </li>
+            <li>Add `__syncthreads()` after the loading phase to ensure all threads have finished loading before any thread starts processing the shared data.</li>
+            <li>Modify the inner loop (`for (int circleIndex = chunkStart; ...)`): Change it to iterate from `i = 0` to `CHUNK_SIZE - 1`. Inside this loop, read the circle's position and radius from the `sharedPositions` and `sharedRadii` arrays using index `i`. Calculate the `globalCircleIndex = chunkStart + i`. Only proceed with `shadePixel` if `globalCircleIndex < chunkEnd` (or check for the padding value like `sharedRadii[i] >= 0`). Pass the correct `globalCircleIndex` to `shadePixel`.
+                ```c++
+                 // Inside the outer chunk loop, AFTER __syncthreads()
+                 for (int i = 0; i < CHUNK_SIZE; ++i) {
+                     int globalCircleIndex = chunkStart + i;
+                     if (globalCircleIndex < chunkEnd) { // Check if it's a valid circle in this chunk
+                         // Read from shared memory
+                         float3 p = make_float3(sharedPositions[i * 3 + 0], sharedPositions[i * 3 + 1], sharedPositions[i * 3 + 2]);
+                         float rad = sharedRadii[i];
+
+                         // Call shadePixel (using the correct global index)
+                         shadePixel(globalCircleIndex, pixelCenterNorm, p, accumulatedColor);
+                     }
+                 }
+                ```
+            </li>
+        </ul>
+        <p class="correctness">Correctness Check: This still processes every circle within each chunk, just reading the data from shared memory instead of global memory after the initial cooperative load. Order and atomicity are preserved. Should pass the checker.</p>
+        <p class="testing">Testing: Run `./checker.py`. Performance might improve slightly if shared memory access is faster than repeated global reads for the circles within a chunk, or it might decrease due to loading overhead and synchronization. The goal here is correctness of the shared memory loading pattern.</p>
+    </div>
+
+    <div class="step">
+        <h3>Step 3: Add Cooperative Filtering Logic</h3>
+        <p class="objective">Introduce the tile-based filtering *after* loading a chunk into shared memory. Build a list in shared memory containing only the indices (within the chunk) of circles that overlap the block's tile.</p>
+        <ul>
+            <li>Declare more shared memory:
+                - `__shared__ int filteredChunkIndices[CHUNK_SIZE];` (to store indices *within the chunk* that pass the filter)
+                - `__shared__ int numFilteredThisChunk;` (a counter for how many circles passed)
+            </li>
+            <li>Inside the outer chunk loop, *after* loading data into shared memory and the first `__syncthreads()`:
+                - Initialize the shared counter: `if (tid == 0) { numFilteredThisChunk = 0; }`
+                - Add another `__syncthreads()` to ensure `numFilteredThisChunk` is zeroed before threads proceed.
+                - Add a filtering phase: Have each thread (or a subset) check a portion of the circles *in shared memory* using `circleInBoxConservative` against the tile boundaries (calculated once per block, same as in the original `kernelRenderCirclesTiled`).
+                - If a circle `i` (from `0` to `CHUNK_SIZE-1`, corresponding to `globalCircleIndex = chunkStart + i`) passes the conservative tile test:
+                    - Atomically increment the shared counter `numFilteredThisChunk` to get a unique position in the `filteredChunkIndices` array.
+                    - Store the chunk-local index `i` into `filteredChunkIndices` at the position returned by the atomic operation.
+                    ```c++
+                    // Example filtering phase (after loading & sync):
+                    // Calculate tile boundaries (tileL, tileR, tileT, tileB) once per block if not already done
+
+                    if (tid == 0) { numFilteredThisChunk = 0; }
+                    __syncthreads(); // Ensure counter is zeroed
+
+                    for (int i = tid; i < CHUNK_SIZE; i += threadsPerBlock) {
+                        int globalCircleIndex = chunkStart + i;
+                        if (globalCircleIndex < chunkEnd) { // Check if valid circle
+                            float3 p = make_float3(sharedPositions[i * 3 + 0], sharedPositions[i * 3 + 1], sharedPositions[i * 3 + 2]);
+                            float rad = sharedRadii[i];
+
+                            if (rad >= 0 && circleInBoxConservative(p.x, p.y, rad, tileL, tileR, tileT, tileB)) {
+                                // Circle *might* overlap the tile, add its chunk-local index to list
+                                int listPos = atomicAdd(&numFilteredThisChunk, 1);
+                                if (listPos < CHUNK_SIZE) { // Avoid potential overflow if many circles overlap
+                                     filteredChunkIndices[listPos] = i;
+                                }
+                            }
+                        }
+                    }
+                    __syncthreads(); // Ensure all threads finish filtering and updating the list/counter
+                    ```
+            </li>
+        </ul>
+        <p class="correctness">Correctness Check: At this point, we have loaded a chunk and created a filtered list of chunk-local indices for it. We haven't yet changed the *processing* loop. The kernel will still iterate through *all* circles in the shared chunk (from Step 2's inner loop). It should still be correct, but we've added the filtering mechanics.</p>
+        <p class="testing">Testing: Run `./checker.py`. Performance will likely decrease further due to the added filtering work, atomics, and synchronization, without yet benefiting from skipping circles during rendering.</p>
+    </div>
+
+    <div class="step">
+        <h3>Step 4: Process Only the Filtered List</h3>
+        <p class="objective">Modify the inner processing loop to iterate only through the `filteredChunkIndices` list built in Step 3, effectively skipping circles that don't overlap the tile.</p>
+        <ul>
+            <li>Replace the inner loop that iterated from `i = 0` to `CHUNK_SIZE - 1` (from Step 2) with a loop that iterates from `k = 0` to `numFilteredThisChunk - 1`.</li>
+            <li>Inside this new loop:
+                - Get the chunk-local index: `int i = filteredChunkIndices[k];`
+                - Get the global circle index: `int globalCircleIndex = chunkStart + i;`
+                - Read the corresponding position and radius from the shared memory arrays (`sharedPositions`, `sharedRadii`) using the chunk-local index `i`.
+                - Call `shadePixel` with the correct `globalCircleIndex` and the data read from shared memory.
+                ```c++
+                // New processing loop (replaces the loop from Step 2):
+                // This comes AFTER the filtering phase and its __syncthreads()
+
+                for (int k = 0; k < numFilteredThisChunk; ++k) {
+                    int i = filteredChunkIndices[k]; // Get chunk-local index from filtered list
+
+                    // Read data from shared memory using chunk-local index 'i'
+                    float3 p = make_float3(sharedPositions[i * 3 + 0], sharedPositions[i * 3 + 1], sharedPositions[i * 3 + 2]);
+                    float rad = sharedRadii[i];
+                    int globalCircleIndex = chunkStart + i; // Calculate global index
+
+                    // Call shadePixel (which performs the fine-grained check)
+                    shadePixel(globalCircleIndex, pixelCenterNorm, p, accumulatedColor);
+                }
+                // A __syncthreads() might be needed here before processing the *next* chunk
+                // if shared memory resources (like the filtered list) are reused immediately.
+                // Add it for safety initially.
+                __syncthreads();
+                ```
+            </li>
+        </ul>
+        <p class="correctness">Correctness Check: This is the crucial step. Each pixel thread now processes only the circles that passed the conservative tile filter for the current chunk. Since `shadePixel` performs the final point-in-circle test, correctness is maintained. The order is preserved because (1) chunks are processed sequentially, and (2) the filtered list for each chunk is processed sequentially (from `k=0` upwards) by each pixel thread. Atomicity is still handled by register accumulation.</p>
+        <p class="testing">Testing: Run `./checker.py`. Performance should now *improve* significantly compared to the baseline, especially on scenes with many circles where many are culled per tile. This is the first step where the performance benefit of the approach becomes apparent.</p>
+    </div>
+
+    <div class="step">
+        <h3>Step 5: Optimization and Refinement</h3>
+        <p class="objective">Fine-tune the implementation for better performance while maintaining correctness.</p>
+        <ul>
+            <li><strong>Tune `CHUNK_SIZE`:</strong> Experiment with different values. Larger chunks reduce outer loop overhead but increase shared memory pressure and might lead to load imbalance if filtering is uneven. Smaller chunks might fit better in cache/shared memory but increase loop overhead. Powers of 2 are often good choices.</li>
+            <li><strong>Optimize Shared Memory Layout/Access:</strong> Ensure accesses to shared memory arrays minimize bank conflicts. For `float3` positions, storing as separate `float` arrays (`sharedPosX`, `sharedPosY`, `sharedPosZ`) might sometimes be better than an array of `float3` depending on access patterns, but often `float3` is fine.</li>
+            <li><strong>Data Loading Optimization:</strong> Ensure the cooperative loading in Step 2 is efficient. Check if using `float4` loads/stores could be beneficial if data aligns well.</li>
+            <li><strong>Minimize Data in Shared Memory:</strong> Do you need the full `float3` position in shared memory for the conservative test, or just `x`, `y`? Only load what's strictly necessary for the filtering and subsequent `shadePixel` call. If color is needed by `shadePixel` but not the filter, consider loading it from global memory only within the final processing loop (Step 4) for the filtered circles.</li>
+            <li><strong>Atomic Operations:</strong> `atomicAdd` on shared memory can be a bottleneck. Ensure it's used correctly. If `CHUNK_SIZE` is small (e.g., <= 32), warp-level primitives might be faster if applicable, but `atomicAdd` is generally robust.</li>
+            <li><strong>Resource Balancing:</strong> Profile the code (e.g., using Nsight Compute). Are you limited by computation, shared memory bandwidth, global memory bandwidth, or latency? Adjust block size, chunk size, and algorithm details based on profiler results. Consider the trade-off between occupancy and shared memory usage.</li>
+            <li><strong>Review `__syncthreads()`:</strong> Ensure all necessary synchronizations are present but remove any that are redundant. For example, the final `__syncthreads()` at the end of the chunk loop might be unnecessary if the next iteration correctly re-initializes shared state before use.</li>
+        </ul>
+        <p class="correctness">Correctness Check: Any optimization must preserve the core logic: process chunks sequentially, cooperatively filter each chunk against the tile, process the filtered list sequentially within the chunk, and accumulate color correctly per pixel. Double-check array bounds, synchronization, and atomic operations.</p>
+        <p class="testing">Testing: Run `./checker.py` frequently during optimization to ensure correctness is maintained. Use the profiler to guide optimization efforts.</p>
+    </div>
+
+</body>
+</html>
