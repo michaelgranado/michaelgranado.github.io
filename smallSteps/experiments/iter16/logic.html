@@ -51,7 +51,7 @@ My thought process for selecting option A involved analyzing the provided "corre
     *   It then iterates through the `tileCircleList`.
     *   **Critically**, inside the loop over relevant circles, it has nested loops iterating through **all pixels** in its assigned tile:
         ```c++
-        for (int i = 0; i < circle_list_length; i++) {
+        for (int i = 0; i &lt; circle_list_length; i++) {
             // ... get circle data ...
             for (int pixelX = start_pixel_x; pixelX &lt; end_pixel_x; pixelX++) {
                 for (int pixelY = start_pixel_y; pixelY &lt; end_pixel_y; pixelY++) {
