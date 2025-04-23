@@ -36,7 +36,7 @@ Question 2: Describe the thought process you had when selecting your answer to Q
 My thought process for selecting option A involved analyzing the provided "correct but unoptimized" CUDA code, specifically the `kernelRenderCirclesTiled` kernel and how it's launched, in conjunction with the performance results.
     </p>
     <ol>
-        <li>Examine Kernel Launch Configuration:** I first looked at how `kernelRenderCirclesTiled` is launched in the `CudaRenderer::render` function:
+        <li><b>Examine Kernel Launch Configuration:</b> I first looked at how `kernelRenderCirclesTiled` is launched in the `CudaRenderer::render` function:
     ```c++
     dim3 blockDim(1, 1); // 256 threads per block &lt;-- The comment is misleading/wrong!
     dim3 gridDim(
@@ -67,9 +67,12 @@ My thought process for selecting option A involved analyzing the provided "corre
 <li><b>Relate to GPU Architecture:</b> GPUs achieve performance through massive parallelism, executing thousands of threads concurrently across many Streaming Multiprocessors (SMs), and within each SM, threads run in parallel. Assigning only one thread per block leaves almost all the execution resources within an SM idle for that block's work.</li>
 
 <li><b>Evaluate Multiple Choice Options:</b>
-    *   <b>A) Inefficient assignment of work:</b> This directly matches the observation. Assigning an entire tile's worth of computation (all relevant circles for all pixels in the tile) to a single thread is a highly inefficient way to distribute the workload onto the parallel hardware.
-    *   <b>B) Lack of parallelism:</b> While there *is* a lack of parallelism *within* each block, the code *does* exhibit parallelism *across* blocks (tiles). Different tiles are processed concurrently by different blocks. Therefore, "Lack of parallelism" is too general. The *specific* problem is *how* the work is assigned, leading to poor intra-block parallelism. Option A is more precise.
-    *   <b>C) Low arithmetic intensity:</b> This refers to the ratio of calculations to memory operations. While the repeated reading/writing of pixel data in the inner loop (`*imgPtrGlobal = color;`) contributes to poor performance and might lower the effective arithmetic intensity, the fundamental bottleneck is that only one thread is doing all this work per block. Even if the arithmetic intensity were high, performance would be terrible due to the serial execution within the block. The primary issue isn't the *nature* of the work (calculations vs. memory), but the *assignment* of that work to too few threads.</li>
+    <ul>
+        <li><b>A) Inefficient assignment of work:</b> This directly matches the observation. Assigning an entire tile's worth of computation (all relevant circles for all pixels in the tile) to a single thread is a highly inefficient way to distribute the workload onto the parallel hardware.</li>
+        <li><b>B) Lack of parallelism:</b> While there *is* a lack of parallelism *within* each block, the code *does* exhibit parallelism *across* blocks (tiles). Different tiles are processed concurrently by different blocks. Therefore, "Lack of parallelism" is too general. The *specific* problem is *how* the work is assigned, leading to poor intra-block parallelism. Option A is more precise.</li>
+        <li><b>C) Low arithmetic intensity:</b> This refers to the ratio of calculations to memory operations. While the repeated reading/writing of pixel data in the inner loop (`*imgPtrGlobal = color;`) contributes to poor performance and might lower the effective arithmetic intensity, the fundamental bottleneck is that only one thread is doing all this work per block. Even if the arithmetic intensity were high, performance would be terrible due to the serial execution within the block. The primary issue isn't the *nature* of the work (calculations vs. memory), but the *assignment* of that work to too few threads.</li>
+    </ul>
+        </li>
 
     <li><b>Consider Performance Results:</b> The test harness shows the code is correct but extremely slow (e.g., `rand10k` takes ~41s vs. reference ~2.7s; `rand100k` takes ~480s vs. reference ~26s). This massive slowdown is consistent with severe underutilization of the GPU due to assigning large work chunks to single threads.</li>
     </ol>
