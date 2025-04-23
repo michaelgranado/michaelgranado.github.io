@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    </head>
+   <body style="background: lightyellow;">
+       <h2>Prompt</h2>
+       <pre style="white-space: pre-wrap; word-break: keep-all;">
+You are a Teaching Assistant for a Parallel Computing course at Stanford University and you are trying to complete a student's programming assignment. You will be given the programming task instructions, correct but unoptimized code, the descriptions of the 8 test cases we will use to evaluate your code, and the results from the test harness used to evaluate your code. In addition to this, you are also given supplementary code files which detail subroutines mentioned in the instructions.
+
+### Instructions:
+&lt;instructions&gt;
+{instructions}
+&lt;/instructions&gt;
+
+------
+
+### Correct, Unoptimized Code:
+&lt;correct_unoptimized_code&gt;
+{correct_code}
+&lt;/correct_unoptimized_code&gt;
+
+------
+
+### Testing Cases:
+&lt;test_case_descriptions&gt;
+{test_case_descriptions}
+&lt;/test_case_descriptions&gt;
+
+------
+
+### Test Harness Results:
+&lt;test_harness_results&gt;
+{test_results}
+&lt;/test_harness_results&gt;
+
+------
+
+### Supplementary Code:
+&lt;supplementary_code_1&gt;
+{suppl_one}
+&lt;/supplementary_code_1&gt;
+
+&lt;supplementary_code_2&gt;
+{suppl_two}
+&lt;/supplementary_code_2&gt;
+
+&lt;supplementary_code_3&gt;
+{suppl_three}
+&lt;/supplementary_code_3&gt;
+
+------
+
+Your task is to answer the following questions. Please output your response in an HTML format.
+
+Question 1: This question is a multiple choice question, and you may only select a single option.
+
+    A) Inefficient assignment of work.
+    B) Lack of parallelism.
+    C) Low arithmetic intensity.
+
+    Which of the choices above is the cause of the performance problem in the code?
+
+Question 2: Describe the throught process you had when selecting your answer to Question 1.
+
+Question 3: Please give a detailed description of the problem that you identified in the current implementation.
+
+Question 4: List as many solutions as you can think of which can solve the problem you have identified in the current implementation. For each solution you list, please provide one or two sentences summarizing the key idea behind the solution.
+
+       </pre>
+       <a href="../../correctness/prompts/prompt_files/instructions.html">Instructions</a>
+       <br>
+       <a href="./correctCode.html">Correct, Unoptimized Code</a>
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_1.html">Supplementary Code #1</a>
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_2.html">Supplementary Code #2</a>       
+       <br>
+       <a href="../../correctness/prompts/prompt_files/supplementary_code_3.html">Supplementary Code #3</a>       
+   </body>
+</html>
