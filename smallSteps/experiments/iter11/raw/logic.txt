@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Solution 4 Implementations</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 20px; }
+        h2, h3 { color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
+        h3 { margin-top: 30px; }
+        code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+        li { margin-bottom: 10px; }
+        .difficulty-rank { font-weight: bold; color: #006400; }
+        .pros { color: green; }
+        .cons { color: red; }
+        .correctness-note { font-style: italic; color: #555; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <h2>Solution 4: Cooperative Tile Processing with Pre-Filtering Implementations</h2>
+
+    <p>
+        The core idea of Solution 4 is to avoid having every pixel thread iterate through all circles. Instead, we first perform a "pre-filtering" step to determine, for each screen tile (corresponding to a thread block), which circles potentially overlap that tile. This generates a smaller list of relevant circles for each tile. The main rendering kernel then has each thread block cooperatively process only the circles relevant to its tile.
+    </p>
+    <p>
+        All proposed implementations below aim to maintain the correctness requirements (atomicity and order) by ensuring that each pixel thread still processes the relevant circles *in their original relative order* and accumulates color contributions locally before a single final write to global memory.
+    </p>
+
+    <hr>
+
+    <h3>Variant 1: Sort-Based Pre-Filtering + Global Memory Rendering</h3>
+    <p><span class="difficulty-rank">Difficulty Rank: 1 (Easiest)</span></p>
+    <p>This approach uses a readily available parallel sort primitive (like Thrust) to group circle indices by the tiles they overlap.</p>
+    <ul>
+        <li>
+            <strong>Pre-Filtering Steps:</strong>
+            <ol>
+                <li><strong>Generate (Circle, Tile) Pairs:</strong> Launch a kernel with N threads (N = number of circles). Each thread `i` takes circle `i`. It calculates the bounding box of circle `i` and determines *all* the screen tiles it overlaps using a function like <code>circleInBoxConservative</code> against tile boundaries. For each overlapping tile `T`, the thread writes a pair `(T, i)` (tile ID, circle index) to a large temporary global buffer. A circle overlapping multiple tiles will generate multiple pairs. An atomic counter can be used to get unique output slots, or estimate buffer size generously.</li>
+                <li><strong>Sort Pairs by Tile ID:</strong> Use a parallel sort (e.g., <code>thrust::sort_by_key</code>) on the temporary buffer, sorting the circle indices (`i`) using the tile IDs (`T`) as keys. This groups all circle indices relevant to the same tile together.</li>
+                <li><strong>Build Tile Offsets & Compact List:</strong> Perform a pass over the sorted buffer (can be done on CPU or with another kernel) to:
+                    <ul>
+                        <li>Identify the start and end indices for each tile ID's group of circles.</li>
+                        <li>Store these start indices (offsets) and the counts per tile into two separate global arrays (<code>tileOffsets</code>, <code>tileCounts</code>), indexed by tile ID.</li>
+                        <li>Copy the sorted circle indices into a final compact global array (<code>filteredCircleIndices</code>).</li>
+                    </ul>
+                </li>
+            </ol>
+        </li>
+        <li>
+            <strong>Rendering Kernel (<code>kernelRenderCirclesFiltered_Global</code>):</strong>
+            <ul>
+                <li>Launched with a 2D grid, one block per tile. Block dimensions (e.g., 16x16) determine tile size.</li>
+                <li>Each block calculates its unique <code>tileID</code>.</li>
+                <li>The block reads the <code>offset = tileOffsets[tileID]</code> and <code>count = tileCounts[tileID]</code> from global memory.</li>
+                <li>Each thread within the block calculates its target pixel coordinates (<code>pixelX</code>, <code>pixelY</code>) within the image.</li>
+                <li>Each thread initializes its local accumulator <code>accumulatedColor</code> with the background color (read from <code>imageData</code>).</li>
+                <li>Each thread then iterates from <code>i = 0</code> to <code>count - 1</code>:
+                    <ul>
+                        <li>Reads <code>circleIndex = filteredCircleIndices[offset + i]</code> from the compact global list.</li>
+                        <li>Reads the data for <code>circleIndex</code> (position, radius, color) from the original global circle data arrays (<code>cuConstRendererParams.position</code>, etc.).</li>
+                        <li>Performs the point-in-circle test for its pixel center against this circle.</li>
+                        <li>If the pixel is covered, calls the shading logic (similar to <code>shadePixel</code>) and blends the contribution into its local <code>accumulatedColor</code>.</li>
+                    </ul>
+                </li>
+                <li>After the loop, each thread writes its final <code>accumulatedColor</code> once to the correct location in <code>imageData</code>.</li>
+            </ul>
+        </li>
+        <li><strong class="pros">Pros:</strong> Conceptually simple pre-processing using standard sort. Render kernel logic is a straightforward loop over a smaller list in global memory. Avoids complex atomic operations during list building and shared memory management in the render kernel.</li>
+        <li><strong class="cons">Cons:</strong> Requires significant temporary storage for the (Tile, Circle) pairs (can be num_circles * avg_tiles_per_circle). Sorting has overhead. Render kernel reads circle indices from global memory, which might not be coalesced depending on access patterns.</li>
+        <li><p class="correctness-note"><strong>Correctness:</strong> Order is maintained because the sort groups circles by tile, but within a tile's group, the original relative order should be preserved if the sort is stable or handled appropriately during offset calculation/rendering (or simply process indices in the order they appear in the filtered list, which corresponds to their original order if the initial pair generation iterates circles 0..N-1). Atomicity is handled by local accumulation and single final write per pixel.</p></li>
+    </ul>
+
+    <hr>
+
+    <h3>Variant 2: Prefix Sum Pre-Filtering + Global Memory Rendering</h3>
+    <p><span class="difficulty-rank">Difficulty Rank: 2 (Medium)</span></p>
+    <p>This approach avoids the large temporary buffer and sort cost of Variant 1 by using atomic operations and prefix sums (scan) to directly build the compact list.</p>
+    <ul>
+        <li>
+            <strong>Pre-Filtering Steps (Example using atomics/scan):</strong>
+            <ol>
+                <li><strong>Count Circles per Tile:</strong> Initialize a global array <code>tileCounts</code> (size = num_tiles) to zeros. Launch a kernel with N threads (N = num_circles). Each thread `i` identifies the tiles its circle overlaps. For each overlapping tile `T`, it performs an <code>atomicAdd(&tileCounts[T], 1)</code>.</li>
+                <li><strong>Calculate Tile Offsets:</strong> Perform an exclusive prefix sum (scan) on the <code>tileCounts</code> array. The result gives the starting offset for each tile's list within the final compact array. Store this in <code>tileOffsets</code>. The total sum from the scan gives the required size for the compact list.</li>
+                <li><strong>Populate Compact List:</strong> Re-initialize (or reuse/decrement) <code>tileCounts</code> (perhaps copy offsets to a temporary place). Launch another kernel with N threads (N = num_circles). Each thread `i` again identifies the tiles its circle overlaps. For each overlapping tile `T`, it atomically determines the position to write to within that tile's section of the final list (e.g., <code>writePos = tileOffsets[T] + atomicAdd(&tileCounts[T], 1)</code> or <code>writePos = tileOffsets[T] + atomicSub(&remainingSlotsInTile[T], 1) - 1</code> if using decrements). It then writes the circle index `i` to <code>filteredCircleIndices[writePos]</code>.</li>
+                 <li><i>Alternative Population:</i> Instead of N threads writing potentially scattered indices, launch T blocks (T=num_tiles). Each block `T` iterates through *all* N circles. If circle `j` overlaps tile `T`, the block writes `j` into its section of `filteredCircleIndices` using `tileOffsets[T]` and a counter local to the block (managed via shared memory atomics or sequential processing within the block).</li>
+            </ol>
+        </li>
+        <li>
+            <strong>Rendering Kernel (<code>kernelRenderCirclesFiltered_Global</code>):</strong>
+            <ul>
+                <li>Identical to the rendering kernel in Variant 1. It reads the pre-computed <code>tileOffsets</code> and <code>tileCounts</code> and iterates through the relevant segment of <code>filteredCircleIndices</code> in global memory.</li>
+            </ul>
+        </li>
+        <li><strong class="pros">Pros:</strong> Avoids the large temporary buffer and overhead of a full sort compared to Variant 1. Can be more memory efficient during pre-processing.</li>
+        <li><strong class="cons">Cons:</strong> Pre-processing logic is more complex, requiring understanding and implementation of atomic operations and prefix sums. Atomic operations can become performance bottlenecks if there's high contention (many circles mapping to the same few tiles). The alternative population step might re-introduce O(Tiles * Circles) work.</li>
+        <li><p class="correctness-note"><strong>Correctness:</strong> Order can be tricky to maintain perfectly with the atomic population method unless care is taken. If multiple threads try to atomically increment the count for the same tile, their write order into the compact list isn't guaranteed relative to their original circle index. The "Alternative Population" method (T blocks iterating 0..N circles) naturally preserves order within each tile's list. Atomicity in the render kernel is fine.</p></li>
+    </ul>
+
+    <hr>
+
+    <h3>Variant 3: Prefix Sum Pre-Filtering + Shared Memory Rendering</h3>
+    <p><span class="difficulty-rank">Difficulty Rank: 3 (Harder)</span></p>
+    <p>This builds upon Variant 2 by optimizing the rendering kernel using shared memory to cache the list of relevant circle indices for the tile.</p>
+    <ul>
+        <li>
+            <strong>Pre-Filtering Steps:</strong>
+            <ul>
+                <li>Identical to the pre-filtering steps in Variant 2 (using prefix sums to generate <code>tileOffsets</code>, <code>tileCounts</code>, and <code>filteredCircleIndices</code>). Ensure the population step preserves relative order if needed.</li>
+            </ul>
+        </li>
+        <li>
+            <strong>Rendering Kernel (<code>kernelRenderCirclesFiltered_Shared</code>):</strong>
+            <ul>
+                <li>Launched with a 2D grid, one block per tile.</li>
+                <li>Declare shared memory, e.g., <code>__shared__ int sharedCircleIndices[MAX_CIRCLES_PER_TILE_IN_SHMEM];</code>.</li>
+                <li>Each block calculates its <code>tileID</code>.</li>
+                <li>Reads <code>offset = tileOffsets[tileID]</code> and <code>count = tileCounts[tileID]</code>.</li>
+                <li><strong>Cooperative Load:</strong> Threads within the block cooperate to load the <code>count</code> circle indices starting from <code>filteredCircleIndices[offset]</code> into the <code>sharedCircleIndices</code> array. This needs careful indexing (<code>threadIdx.x + blockDim.x * threadIdx.y</code>) and loop structure if <code>count</code> exceeds the block dimension. Handle the case where <code>count</code> exceeds <code>MAX_CIRCLES_PER_TILE_IN_SHMEM</code> (process in chunks or fall back to global reads).</li>
+                <li><code>__syncthreads()</code> to ensure loading is complete before processing.</li>
+                <li>Each thread calculates its target pixel coordinates (<code>pixelX</code>, <code>pixelY</code>).</li>
+                <li>Each thread initializes its local accumulator <code>accumulatedColor</code>.</li>
+                <li>Each thread then iterates from <code>i = 0</code> to <code>count - 1</code> (or the current chunk size):
+                    <ul>
+                        <li>Reads <code>circleIndex = sharedCircleIndices[i]</code> from <strong>shared memory</strong>.</li>
+                        <li>Reads the data for <code>circleIndex</code> (position, radius, color) from global memory.</li>
+                        <li>Performs point-in-circle test and shading, blending into local <code>accumulatedColor</code>.</li>
+                    </ul>
+                 </li>
+                 <li>If processing in chunks, loop back to load the next chunk into shared memory, synchronize, and process, accumulating onto the same <code>accumulatedColor</code>.</li>
+                <li>After all relevant circles (all chunks) are processed, each thread writes its final <code>accumulatedColor</code> once to <code>imageData</code>.</li>
+            </ul>
+        </li>
+        <li><strong class="pros">Pros:</strong> Reading circle indices from shared memory during rendering is much faster than reading from global memory, especially if the list is accessed multiple times (though here, each thread likely reads each index once). Cooperative load from global memory can be more efficient (coalesced).</li>
+        <li><strong class="cons">Cons:</strong> Significantly increased complexity in the rendering kernel due to shared memory management (cooperative loading logic, synchronization, bounds checking, bank conflicts). Must handle cases where the number of circles per tile exceeds available shared memory (chunking logic adds complexity).</li>
+         <li><p class="correctness-note"><strong>Correctness:</strong> Order is maintained by processing the indices sequentially from the shared memory array (assuming they were loaded/populated in the correct order). Atomicity is handled by local accumulation.</p></li>
+    </ul>
+
+</body>
+</html>
