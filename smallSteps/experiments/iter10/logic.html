@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Incremental Plan for Solution 4</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 20px; }
+        h1, h2 { color: #333; }
+        h3 { color: #555; }
+        strong { color: #0056b3; }
+        code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+        .step { border-left: 3px solid #007bff; padding-left: 15px; margin-bottom: 20px; }
+        .correctness { background-color: #e7f7e7; border: 1px solid #b8d9b8; padding: 10px; margin-top: 10px; border-radius: 4px; }
+        .optimization { background-color: #fff3e0; border: 1px solid #ffc966; padding: 10px; margin-top: 10px; border-radius: 4px; }
+        .note { font-style: italic; color: #666; }
+    </style>
+</head>
+<body>
+
+    <h1>Incremental Plan for Implementing Solution 4: Cooperative Tile Processing with Pre-Filtering</h1>
+    <p>
+        This plan outlines incremental steps to refactor the initial correct-but-slow pixel-parallel renderer (`kernelRenderCirclesTiled`) towards the more efficient "Cooperative Tile Processing with Pre-Filtering" approach (Solution 4). Each step aims to maintain correctness, allowing you to run the checker (`./checker.py`) after each modification to verify the output.
+    </p>
+    <p>
+        The core idea of Solution 4 is to avoid having every pixel thread check every circle. Instead, we first determine which circles *might* overlap each screen tile (pre-filtering). Then, threads within a tile block cooperatively load only the relevant circle information (ideally into shared memory) and process just that smaller list.
+    </p>
+
+    <hr>
+
+    <h2>Proposed Plan:</h2>
+
+    <div class="step">
+        <h3>Step 0: Baseline (Current Code)</h3>
+        <p>
+            Start with the provided `cudaRenderer.cu` which implements `kernelRenderCirclesTiled`. This kernel assigns one thread per pixel. Each thread iterates through all circles, uses a coarse tile-culling check (`circleInBoxConservative`), performs the fine-grained `shadePixel` check for circles passing the coarse cull, accumulates color locally in registers, and writes the final pixel color once to global memory.
+        </p>
+        <div class="correctness">
+            <strong>Correctness Check:</strong> This implementation is already correct. It preserves order because each pixel thread processes potentially contributing circles sequentially from index 0 to N-1. Atomicity is guaranteed by local accumulation and a single final write per pixel. Running `./checker.py` should show correctness (though performance will be poor for complex scenes).
+        </div>
+    </div>
+
+    <div class="step">
+        <h3>Step 1: Pre-computation - Identify Potential Tile-Circle Overlaps</h3>
+        <p>
+            The goal here is to create a list of `(tile_id, circle_index)` pairs for every potential overlap between a circle and a screen tile. This requires a new kernel and intermediate storage.
+        </p>
+        <ol>
+            <li><strong>Define Tile Structure:</strong> Ensure you have constants defining tile dimensions (e.g., `TILE_DIM_X`, `TILE_DIM_Y`, matching the block dimensions like 16x16) and calculate the total number of tiles (`numTilesX`, `numTilesY`, `totalTiles`).</li>
+            <li><strong>Allocate Intermediate Buffers:</strong> Allocate two large temporary GPU buffers:
+                <ul>
+                    <li>`d_tile_ids`: To store the ID of the tile potentially overlapped.</li>
+                    <li>`d_circle_indices`: To store the index of the circle potentially overlapping the tile.</li>
+                </ul>
+                The size needs to accommodate the maximum possible number of overlaps (worst case: `numCircles * totalTiles`, which is too large). A more practical approach involves two passes:
+                <ul>
+                    <li><strong>Pass 1a (Count Overlaps):</strong> Create a kernel launched with one thread per circle. Each thread calculates the bounding box of its circle and determines the range of tiles it overlaps using `circleInBoxConservative` against each tile's boundaries. Atomically increment a counter for *each* tile the circle overlaps. Store these counts per tile in a `d_tile_overlap_counts` buffer (`totalTiles` elements).</li>
+                    <li><strong>Pass 1b (Calculate Offsets):</strong> Perform an exclusive prefix sum (scan) on `d_tile_overlap_counts` to get the starting offset for each tile's list within the final `(tile_id, circle_index)` pair buffers. Store these offsets in `d_tile_offsets`. The total sum gives the required size for the pair buffers - allocate `d_tile_ids` and `d_circle_indices` now.</li>
+                    <li><strong>Pass 1c (Write Pairs):</strong> Launch the per-circle kernel again. For each tile a circle overlaps, atomically decrement the tile's count in a temporary copy of `d_tile_overlap_counts` to get a unique position within that tile's section of the output buffers, and write the `tile_id` and `circle_index` to `d_tile_ids` and `d_circle_indices` at `d_tile_offsets[tile_id] + unique_position`.
+                    <br><span class="note">(Alternative using Thrust: A simpler, though perhaps less performant for this specific structure, approach might involve `thrust::copy_if` or custom iterators, but the explicit counting/offset approach is often used for this "scatter" operation).</span></li>
+                </ul>
+            </li>
+            <li><strong>Integration:</strong> Add calls to these new kernels and buffer allocations/deallocations within `CudaRenderer::render()` *before* launching the main rendering kernel.</li>
+        </ol>
+        <div class="correctness">
+            <strong>Correctness Check:</strong> At this stage, you have only added pre-computation steps. The original `kernelRenderCirclesTiled` is still unmodified and used for rendering. Running `./checker.py` should still pass, showing the same performance as Step 0, but with added overhead from the new kernels. This verifies your overlap calculation logic doesn't crash or corrupt unrelated data.
+        </div>
+    </div>
+
+    <div class="step">
+        <h3>Step 2: Sort Overlap Pairs by Tile ID</h3>
+        <p>
+            Sort the generated pairs based on the `tile_id`. This groups all potentially relevant circles for a specific tile together consecutively in the `d_circle_indices` buffer.
+        </p>
+        <ol>
+            <li><strong>Sort:</strong> Use `thrust::sort_by_key(d_tile_ids, d_tile_ids + total_pairs, d_circle_indices);` where `total_pairs` is the sum obtained from the prefix scan in Step 1b. This sorts `d_tile_ids` and rearranges `d_circle_indices` according to the sorted tile IDs.</li>
+        </ol>
+        <div class="correctness">
+            <strong>Correctness Check:</strong> Still only manipulating intermediate data. The rendering kernel remains unchanged. Run `./checker.py`. Should still pass with similar performance to Step 1.
+        </div>
+    </div>
+
+    <div class="step">
+        <h3>Step 3: Determine Tile Offsets and Counts in Sorted List</h3>
+        <p>
+            Now that the circle indices are grouped by tile, find the start offset and the number of circles associated with each tile in the sorted `d_circle_indices` buffer.
+        </p>
+        <ol>
+            <li><strong>Allocate Tile Info Buffer:</strong> Allocate a buffer `d_tile_info[totalTiles]` on the GPU. Each element could be a struct like `struct TileInfo { int offset; int count; };`.</li>
+            <li><strong>Find Runs:</strong> Use Thrust operations like `thrust::reduce_by_key` or a combination of `thrust::unique_by_key` and `thrust::lower_bound`/`upper_bound` on the sorted `d_tile_ids` array to find the start (`offset`) and end of the range for each unique tile ID. Calculate the `count` (`end - start`).</li>
+            <li><strong>Store Info:</strong> Write the calculated `offset` and `count` for each tile into the `d_tile_info` buffer. Tiles with no overlapping circles should have a count of 0.</li>
+        </ol>
+         <div class="correctness">
+            <strong>Correctness Check:</strong> Still pre-computation. Run `./checker.py`. Should still pass.
+        </div>
+    </div>
+
+     <div class="step">
+        <h3>Step 4: Modify Render Kernel to Use Pre-Computed Lists (Indices Only)</h3>
+        <p>
+            This is the first major change to the rendering logic. Modify `kernelRenderCirclesTiled` to use the pre-computed information. Threads in a block will cooperatively load *only the indices* of relevant circles into shared memory and iterate over that smaller list.
+        </p>
+        <ol>
+            <li><strong>Kernel Signature/Setup:</strong> Pass pointers to `d_tile_info` and `d_sorted_circle_indices` to the kernel (e.g., via `cudaMemcpyToSymbol` if using constant memory for `d_tile_info`, or pass as kernel arguments).</li>
+            <li><strong>Shared Memory:</strong> Declare shared memory within the kernel: `__shared__ int s_circle_indices[MAX_CIRCLES_PER_TILE];`. Choose a reasonable `MAX_CIRCLES_PER_TILE` (e.g., 256, 512).</li>
+            <li><strong>Load Tile Info:</strong> Each block calculates its `tile_id`. The first thread (or all threads redundantly) reads the `offset` and `count` for this `tile_id` from `d_tile_info`.</li>
+            <li><strong>Cooperative Load:</strong> Threads within the block cooperate to load `min(count, MAX_CIRCLES_PER_TILE)` circle indices from `d_sorted_circle_indices[offset]` into `s_circle_indices`. Use `threadIdx.x + blockDim.x * threadIdx.y` (linear thread ID within block) to calculate source and destination indices for the load. Ensure `__syncthreads()` after loading. Store the number of loaded indices (e.g., `loaded_count = min(count, MAX_CIRCLES_PER_TILE)`).</li>
+            <li><strong>Modified Loop:</strong> Replace the old loop `for (int circleIndex = 0; ...)` with `for (int i = 0; i < loaded_count; i++)`. Inside the loop, get the actual circle index: `int circleIndex = s_circle_indices[i];`.</li>
+            <li><strong>Fetch Data & Shade:</strong> Inside the new loop, use `circleIndex` to fetch the required circle data (position, radius, color) from <strong>global memory</strong> (`cuConstRendererParams.position`, etc.). Call `shadePixel` as before. The rest of the logic (local accumulation, final write) remains the same.</li>
+            <li><strong>Handle Overflow (Basic):</strong> For now, if `count > MAX_CIRCLES_PER_TILE`, this implementation will only process the first `MAX_CIRCLES_PER_TILE` circles. This might lead to incorrect results for dense scenes but is a valid intermediate step. We'll address this later.</li>
+        </ol>
+         <div class="correctness">
+            <strong>Correctness Check:</strong> This is a critical step. Run `./checker.py`.
+            <ul>
+                <li>If it passes, congratulations! You've successfully implemented the core logic of tile-based processing. The order is maintained because the circles within the tile's list (`s_circle_indices`) are processed in the order they appeared in the sorted list, which preserves the original relative ordering needed for correct alpha blending for any specific pixel. Atomicity is still handled by local accumulation.</li>
+                <li>If it fails, carefully debug the pre-computation steps (Steps 1-3) and the cooperative loading and loop logic in this step. Common errors include incorrect indexing, race conditions during loading, or issues with tile ID calculation. The failure might only occur on specific scenes if it's related to the `MAX_CIRCLES_PER_TILE` limit.</li>
+            </ul>
+        </div>
+        <div class="optimization">
+            <strong>Performance:</strong> Should be significantly faster than Step 0/1/2/3, especially on scenes with many circles but sparse overlaps (like `rand1M`), as threads now iterate over much smaller lists. Performance might still be limited by global memory reads inside the loop and the `MAX_CIRCLES_PER_TILE` limitation.
+        </div>
+    </div>
+
+    <div class="step">
+        <h3>Step 5: Optimize Render Kernel with Shared Circle Data</h3>
+        <p>
+            Reduce global memory access inside the main loop by loading not just the indices, but also the frequently accessed circle data (position, radius) into shared memory.
+        </p>
+        <ol>
+            <li><strong>More Shared Memory:</strong> Declare additional shared memory arrays for circle properties needed within the loop, e.g., `__shared__ float s_posX[MAX_CIRCLES_PER_TILE];`, `__shared__ float s_posY[MAX_CIRCLES_PER_TILE];`, `__shared__ float s_radius[MAX_CIRCLES_PER_TILE];`, etc. Be mindful of shared memory limits per SM.</li>
+            <li><strong>Cooperative Load (Extended):</strong> Modify the cooperative loading step (Step 4.4). After loading an index into `s_circle_indices[local_idx]`, the same thread (or group of threads) should use that index (`circleIndex = s_circle_indices[local_idx]`) to read the corresponding position, radius, etc., from global memory and store them into `s_posX[local_idx]`, `s_posY[local_idx]`, etc. Ensure `__syncthreads()` after all shared memory is populated.</li>
+            <li><strong>Read from Shared Memory:</strong> Modify the main loop (Step 4.6). Instead of fetching circle data from global memory using `circleIndex`, read it directly from the shared memory arrays using the loop index `i` (e.g., `s_posX[i]`, `s_posY[i]`, `s_radius[i]`). The call to `shadePixel` will need to be adjusted to take these values.</li>
+        </ol>
+        <div class="correctness">
+            <strong>Correctness Check:</strong> Run `./checker.py`. This step primarily changes *where* data is read from (shared vs. global), not the logic or order of operations. It should still pass if Step 4 passed. Failures likely indicate errors in the cooperative loading of the *extra* data or indexing into the new shared memory arrays.
+        </div>
+        <div class="optimization">
+            <strong>Performance:</strong> This should provide another performance boost over Step 4, especially if multiple threads within the block access the same circle data (which is likely). The bottleneck might now shift to the pre-computation steps, shared memory capacity, or the `MAX_CIRCLES_PER_TILE` limit.
+        </div>
+    </div>
+
+    <div class="step">
+        <h3>Step 6: Handle Tile Overflow (Chunking)</h3>
+        <p>
+            Make the implementation robust by handling cases where the number of circles overlapping a tile (`count`) exceeds `MAX_CIRCLES_PER_TILE`. Process the circles for such tiles in multiple chunks.
+        </p>
+        <ol>
+            <li><strong>Outer Loop:</strong> Wrap the cooperative loading (Step 5.2) and the processing loop (Step 5.3) inside an outer loop that iterates through chunks of circles for the tile. E.g., `for (int chunk_offset = 0; chunk_offset < count; chunk_offset += MAX_CIRCLES_PER_TILE)`.</li>
+            <li><strong>Adjust Loading:</strong> Inside the outer loop, calculate the number of circles to load in the current chunk (`num_in_chunk = min(MAX_CIRCLES_PER_TILE, count - chunk_offset)`). Modify the cooperative load to fetch indices/data starting from `d_sorted_circle_indices[offset + chunk_offset]`.</li>
+            <li><strong>Adjust Processing Loop:</strong> The inner processing loop should now run from `0` to `num_in_chunk`.</li>
+        </ol>
+         <div class="correctness">
+            <strong>Correctness Check:</strong> Run `./checker.py`. This ensures correctness even for scenes with very high circle density in some tiles. Each chunk is processed sequentially, and the order within chunks is preserved, maintaining overall correctness. If Step 5 passed, this should also pass.
+        </div>
+         <div class="optimization">
+            <strong>Performance:</strong> Performance on dense scenes should now be correct and potentially improved compared to the truncated approach in Steps 4/5. Overall performance depends heavily on the scene characteristics and the efficiency of the pre-computation and chunk processing.
+        </div>
+    </div>
+
+    <hr>
+    <p>
+        By following these steps, you incrementally build the optimized solution, verifying correctness along the way. Remember to use the `cudaCheckError` macros extensively during development. Good luck!
+    </p>
+
+</body>
+</html>
