@@ -87,7 +87,6 @@ Question 3: Please give a detailed description of the problem that you identifie
 </div>
 
 <div class="answer">
-<pre>
 <p>The primary performance problem in the provided `cudaRenderer.cu` implementation lies in the <b>inefficient assignment of work within the `kernelRenderCirclesTiled` kernel</b>, stemming directly from its launch configuration and leading to a severe lack of intra-block parallelism.</p>
 
 <p>Here's a detailed breakdown:</p>
