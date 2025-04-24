@@ -37,22 +37,23 @@ My thought process for selecting option A involved analyzing the provided "corre
     </p>
     <ol>
         <li><b>Examine Kernel Launch Configuration:</b> I first looked at how `kernelRenderCirclesTiled` is launched in the `CudaRenderer::render` function:
-    ```c++
+    <pre><code>
     dim3 blockDim(1, 1); // 256 threads per block &lt;-- The comment is misleading/wrong!
     dim3 gridDim(
         (image-&gt;width + TILE_DIM_X - 1) / TILE_DIM_X,
         (image-&gt;height + TILE_DIM_Y - 1) / TILE_DIM_Y);
     kernelRenderCirclesTiled&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;();
-    ```
-    The crucial part is `dim3 blockDim(1, 1)`. This configuration explicitly tells the CUDA runtime to launch each block with only **one** thread (1x1=1).</li>
+    </code></pre>
+    The crucial part is `dim3 blockDim(1, 1)`. This configuration explicitly tells the CUDA runtime to launch each block with only <b>one</b> thread (1x1=1).</li>
         
         <li> <b>Analyze Kernel Logic (`kernelRenderCirclesTiled`):</b> Given that only one thread executes per block, I examined what this single thread does:
-    *   It is responsible for an entire tile of pixels (e.g., `TILE_DIM_X` x `TILE_DIM_Y`, potentially 16x16 = 256 pixels).
-    *   It iterates through batches of circles.
-    *   It performs tile culling (using `circleInBoxConservative`) for circles in the batch, storing relevant circle indices in shared memory (`tileCircleList`).
-    *   It then iterates through the `tileCircleList`.
-    *   **Critically**, inside the loop over relevant circles, it has nested loops iterating through **all pixels** in its assigned tile:
-        ```c++
+        <ul>
+            <li>It is responsible for an entire tile of pixels (e.g., `TILE_DIM_X` x `TILE_DIM_Y`, potentially 16x16 = 256 pixels).</li>
+            <li>It iterates through batches of circles.</li>
+            <li>It performs tile culling (using `circleInBoxConservative`) for circles in the batch, storing relevant circle indices in shared memory (`tileCircleList`).</li>
+            <li>It then iterates through the `tileCircleList`.</li>
+            <li><b>Critically</b>, inside the loop over relevant circles, it has nested loops iterating through <b>all pixels</b> in its assigned tile:
+        <pre><code>
         for (int i = 0; i &lt; circle_list_length; i++) {
             // ... get circle data ...
             for (int pixelX = start_pixel_x; pixelX &lt; end_pixel_x; pixelX++) {
@@ -61,8 +62,9 @@ My thought process for selecting option A involved analyzing the provided "corre
                 }
             }
         }
-        ```
-    *   This means the single thread serially processes every relevant circle for every pixel within its tile.
+        </code></pre>
+            </li>
+            <li>This means the single thread serially processes every relevant circle for every pixel within its tile.</li>
         </li>
 <li><b>Relate to GPU Architecture:</b> GPUs achieve performance through massive parallelism, executing thousands of threads concurrently across many Streaming Multiprocessors (SMs), and within each SM, threads run in parallel. Assigning only one thread per block leaves almost all the execution resources within an SM idle for that block's work.</li>
 
