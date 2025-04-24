@@ -38,7 +38,7 @@ My thought process for selecting option A involved analyzing the provided "corre
     <ol>
         <li><b>Examine Kernel Launch Configuration:</b> I first looked at how `kernelRenderCirclesTiled` is launched in the `CudaRenderer::render` function:
     <pre><code>
-    dim3 blockDim(1, 1); // 256 threads per block &lt;-- The comment is misleading/wrong!
+    dim3 blockDim(1, 1);
     dim3 gridDim(
         (image-&gt;width + TILE_DIM_X - 1) / TILE_DIM_X,
         (image-&gt;height + TILE_DIM_Y - 1) / TILE_DIM_Y);
