@@ -104,7 +104,7 @@ Question 3: Please give a detailed description of the problem that you identifie
     <li>Crucially, <b>nested inside the circle loop</b>, iterate through *every single pixel* within the tile (`for (int pixelX = ...)` and `for (int pixelY = ...)`).</li>
     <li>For each pixel-circle combination, read the current pixel color from global memory (`float4 color = *imgPtrGlobal;`), execute the `shadePixel` function (which involves distance calculations and potentially color lookups/blending), and write the updated pixel color back to global memory (`*imgPtrGlobal = color;`).</li>
 </ul>
-<li>
+</li>
 <li><b>Consequences:</b>
 <ul>
     <li><b>Massive Underutilization:</b> Most of the processing units within the SM assigned to execute this block remain idle because there's only one active thread. The GPU's parallel processing power is wasted.</li>
@@ -113,7 +113,7 @@ Question 3: Please give a detailed description of the problem that you identifie
     <li><b>Poor Scalability:</b> The performance bottleneck is directly tied to the serial processing within the tile, making the renderer extremely slow, especially for scenes with many circles or high overlap (large `circle_list_length`), as confirmed by the test harness results.</li>
 </ul>
 </li>
-
+</ol>
 <p>In summary, the core problem is the <b>1-thread-per-block launch configuration</b>, which assigns far too much serial work (processing all relevant circles for all pixels in a tile) to a single thread, fundamentally failing to leverage the massive parallelism that GPUs offer and are designed for. This inefficient work assignment is the primary reason for the drastically slow performance compared to the reference solution.</p>
 </div>
 
